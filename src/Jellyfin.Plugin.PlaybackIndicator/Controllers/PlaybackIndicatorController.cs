@@ -94,8 +94,7 @@ public class PlaybackIndicatorController : ControllerBase
     [AllowAnonymous]
     public ActionResult GetPlaybackIndicatorJs()
     {
-        var ns = typeof(PlaybackIndicatorController).Namespace;
-        var resourceName = $"{ns}.Web.playback-indicator.js";
+        var resourceName = "Jellyfin.Plugin.PlaybackIndicator.Web.playback-indicator.js";
         using var stream = typeof(PlaybackIndicatorController).Assembly
             .GetManifestResourceStream(resourceName);
         if (stream is null)

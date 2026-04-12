@@ -90,11 +90,14 @@
             cacheTtl: 3600,
             showTv: true,
             showMovies: true,
-            apiBase: ApiClient.serverAddress()
+            apiBase: typeof ApiClient !== 'undefined' ? ApiClient.serverAddress() : ''
         };
 
         // Load config from plugin
-        fetch(ApiClient.getUrl('Plugin/PlaybackIndicator/Settings'), { credentials: 'include' })
+        var settingsUrl = typeof ApiClient !== 'undefined'
+            ? ApiClient.getUrl('Plugin/PlaybackIndicator/Settings')
+            : 'Plugin/PlaybackIndicator/Settings';
+        fetch(settingsUrl, { credentials: 'include' })
             .then(r => r.ok ? r.json() : null)
             .then(cfg => {
                 if (cfg) {
@@ -118,7 +121,10 @@
             window.PlaybackIndicatorConfig.showTv = cfg.ShowOnTvShows;
             window.PlaybackIndicatorConfig.showMovies = cfg.ShowOnMovies;
 
-            fetch(ApiClient.getUrl('Plugin/PlaybackIndicator/Settings'), {
+            var saveUrl = typeof ApiClient !== 'undefined'
+                ? ApiClient.getUrl('Plugin/PlaybackIndicator/Settings')
+                : 'Plugin/PlaybackIndicator/Settings';
+            fetch(saveUrl, {
                 method: 'POST',
                 credentials: 'include',
                 headers: { 'Content-Type': 'application/json' },
@@ -131,8 +137,5 @@
             });
         });
     </script>
-
-    <!-- Playback Indicator JS — served from controller so it's always accessible -->
-    <script src="Plugin/PlaybackIndicator/playback-indicator.js"></script>
 </body>
 </html>
