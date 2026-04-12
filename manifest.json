@@ -12,7 +12,7 @@
                 "changelog": "Device-specific cache keys fix cross-device wrong status, badge text alignment fix",
                 "targetAbi": "10.11.0.0",
                 "sourceUrl": "https://raw.githubusercontent.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/main/releases/jellyfin-plugin-playbackindicator-0.2.0.0.zip",
-                "checksum": "e65973eb34ac8311152718ce60a48561",
+                "checksum": "712f38493d495b9b1a76aad14d2d8da7",
                 "timestamp": "2026-04-12T00:00:00Z"
             },
             {

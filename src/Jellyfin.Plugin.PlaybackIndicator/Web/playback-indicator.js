@@ -77,29 +77,123 @@
     }
 
     /**
-     * Minimal DeviceProfile for web browsers so Jellyfin can correctly
-     * evaluate DirectPlay vs DirectStream vs Transcode.
-     * Without this, the GET endpoint returns SupportsDirectPlay=true for everything.
+     * Builds a DeviceProfile dynamically by probing the browser's actual
+     * codec/container support via HTMLMediaElement.canPlayType().
+     * This mirrors the logic in Jellyfin's own web client bundle so the
+     * PlaybackInfo API returns accurate DirectPlay/DirectStream/Transcode results.
      */
-    function getWebDeviceProfile() {
-        var videoCodecs = 'h264,h265,hevc,vp8,vp9,av1';
-        var audioCodecs = 'aac,mp3,opus,flac,vorbis,ac3,eac3';
-        return {
-            DirectPlayProfiles: [
-                { Container: 'mp4,m4v', Type: 'Video', VideoCodec: videoCodecs, AudioCodec: audioCodecs },
-                { Container: 'webm', Type: 'Video', VideoCodec: 'vp8,vp9,av1', AudioCodec: 'opus,vorbis' },
-                { Container: 'mp3', Type: 'Audio' },
-                { Container: 'aac,m4a,m4b', Type: 'Audio' },
-                { Container: 'flac', Type: 'Audio' },
-                { Container: 'webma,webm', Type: 'Audio' },
-                { Container: 'wav', Type: 'Audio' },
-                { Container: 'ogg,oga', Type: 'Audio' }
-            ],
-            TranscodingProfiles: [
-                { Container: 'ts', Type: 'Video', VideoCodec: 'h264', AudioCodec: 'aac,mp3', Context: 'Streaming', Protocol: 'hls', BreakOnNonKeyFrames: true },
-                { Container: 'mp4', Type: 'Video', VideoCodec: 'h264', AudioCodec: 'aac,mp3', Context: 'Static', Protocol: 'http' },
-                { Container: 'mp3', Type: 'Audio', AudioCodec: 'mp3', Context: 'Streaming', Protocol: 'http' }
-            ],
+    function buildBrowserProfile() {
+        var video = document.createElement('video');
+        var audio = document.createElement('audio');
+
+        function canPlay(el, mime) {
+            return !!(el.canPlayType && el.canPlayType(mime).replace(/no/, ''));
+        }
+
+        // ── Detect video codec support ──
+        var hasH264 = canPlay(video, 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"');
+        var hasHevc = canPlay(video, 'video/mp4; codecs="hvc1.1.L120"') ||
+                      canPlay(video, 'video/mp4; codecs="hev1.1.L120"');
+        var hasVp8  = canPlay(video, 'video/webm; codecs="vp8"');
+        var hasVp9  = canPlay(video, 'video/webm; codecs="vp9"');
+        var hasAv1  = canPlay(video, 'video/mp4; codecs="av01.0.15M.08"');
+
+        // ── Detect audio codec support ──
+        var hasAac   = canPlay(audio, 'audio/mp4; codecs="mp4a.40.2"');
+        var hasMp3   = canPlay(audio, 'audio/mpeg');
+        var hasOpus  = canPlay(audio, 'audio/webm; codecs="opus"');
+        var hasFlac  = canPlay(audio, 'audio/flac');
+        var hasAlac  = canPlay(audio, 'audio/mp4; codecs="alac"');
+        var hasVorbis = canPlay(audio, 'audio/ogg; codecs="vorbis"');
+        var hasAc3   = canPlay(video, 'video/mp4; codecs="ac-3"');
+        var hasEac3  = canPlay(video, 'video/mp4; codecs="ec-3"');
+
+        // ── Detect container support ──
+        var hasMkv = canPlay(video, 'video/x-matroska') || canPlay(video, 'video/mkv');
+        var hasHls = canPlay(video, 'application/x-mpegURL') ||
+                     canPlay(video, 'application/vnd.apple.mpegURL');
+
+        // ── Build codec lists ──
+        var mp4VideoCodecs = [];
+        var webmVideoCodecs = [];
+        var mp4AudioCodecs = [];
+        var webmAudioCodecs = [];
+        var hlsVideoCodecs = [];
+        var hlsAudioCodecs = [];
+
+        if (hasH264) { mp4VideoCodecs.push('h264'); hlsVideoCodecs.push('h264'); }
+        if (hasHevc) { mp4VideoCodecs.push('hevc'); hlsVideoCodecs.push('hevc'); }
+        if (hasVp9)  { mp4VideoCodecs.push('vp9'); webmVideoCodecs.push('vp9'); hlsVideoCodecs.push('vp9'); }
+        if (hasVp8)  { webmVideoCodecs.push('vp8'); }
+        if (hasAv1)  { mp4VideoCodecs.push('av1'); webmVideoCodecs.push('av1'); hlsVideoCodecs.push('av1'); }
+
+        if (hasAac)    { mp4AudioCodecs.push('aac'); hlsAudioCodecs.push('aac'); }
+        if (hasMp3)    { mp4AudioCodecs.push('mp3'); hlsAudioCodecs.push('mp3'); }
+        if (hasOpus)   { mp4AudioCodecs.push('opus'); webmAudioCodecs.push('opus'); hlsAudioCodecs.push('opus'); }
+        if (hasFlac)   { mp4AudioCodecs.push('flac'); hlsAudioCodecs.push('flac'); }
+        if (hasAlac)   { mp4AudioCodecs.push('alac'); }
+        if (hasVorbis) { mp4AudioCodecs.push('vorbis'); webmAudioCodecs.push('vorbis'); }
+        if (hasAc3)    { mp4AudioCodecs.push('ac3'); hlsAudioCodecs.push('ac3'); }
+        if (hasEac3)   { mp4AudioCodecs.push('eac3'); hlsAudioCodecs.push('eac3'); }
+
+        // ── Assemble DirectPlayProfiles ──
+        var directPlay = [];
+
+        if (webmVideoCodecs.length) {
+            directPlay.push({ Container: 'webm', Type: 'Video',
+                VideoCodec: webmVideoCodecs.join(','), AudioCodec: (webmAudioCodecs.length ? webmAudioCodecs : ['vorbis']).join(',') });
+        }
+        if (mp4VideoCodecs.length) {
+            directPlay.push({ Container: 'mp4,m4v', Type: 'Video',
+                VideoCodec: mp4VideoCodecs.join(','), AudioCodec: mp4AudioCodecs.join(',') });
+        }
+        if (hasMkv && mp4VideoCodecs.length) {
+            directPlay.push({ Container: 'mkv', Type: 'Video',
+                VideoCodec: mp4VideoCodecs.join(','), AudioCodec: mp4AudioCodecs.join(',') });
+        }
+
+        // Audio-only containers
+        var audioFormats = [
+            { test: hasMp3,    container: 'mp3' },
+            { test: hasAac,    container: 'aac' },
+            { test: hasAac || hasAlac, container: 'm4a,m4b' },
+            { test: hasFlac,   container: 'flac' },
+            { test: hasOpus || hasVorbis, container: 'webma,webm' },
+            { test: true,      container: 'wav' },
+            { test: hasVorbis || hasOpus, container: 'ogg,oga' }
+        ];
+        for (var i = 0; i < audioFormats.length; i++) {
+            if (audioFormats[i].test) {
+                directPlay.push({ Container: audioFormats[i].container, Type: 'Audio' });
+            }
+        }
+
+        // ── Assemble TranscodingProfiles ──
+        var transcoding = [];
+        var transVideoCodec = hasH264 ? 'h264' : (mp4VideoCodecs[0] || 'h264');
+        var transAudioCodecs = [];
+        if (hasAac) transAudioCodecs.push('aac');
+        if (hasMp3) transAudioCodecs.push('mp3');
+        if (hasAc3) transAudioCodecs.push('ac3');
+        if (hasEac3) transAudioCodecs.push('eac3');
+        if (hasOpus) transAudioCodecs.push('opus');
+        var transAudio = transAudioCodecs.length ? transAudioCodecs.join(',') : 'aac';
+
+        if (hasHls) {
+            transcoding.push({ Container: 'ts', Type: 'Video', VideoCodec: transVideoCodec,
+                AudioCodec: transAudio, Context: 'Streaming', Protocol: 'hls', BreakOnNonKeyFrames: true });
+        }
+        transcoding.push({ Container: 'mp4', Type: 'Video', VideoCodec: transVideoCodec,
+            AudioCodec: transAudio, Context: 'Static', Protocol: 'http' });
+        transcoding.push({ Container: 'mp3', Type: 'Audio', AudioCodec: 'mp3',
+            Context: 'Streaming', Protocol: 'http' });
+
+        var profile = {
+            MaxStreamingBitrate: 120000000,
+            MaxStaticBitrate: 100000000,
+            MusicStreamingTranscodingBitrate: 384000,
+            DirectPlayProfiles: directPlay,
+            TranscodingProfiles: transcoding,
             ContainerProfiles: [],
             CodecProfiles: [],
             SubtitleProfiles: [
@@ -108,6 +202,12 @@
                 { Format: 'ssa', Method: 'External' }
             ]
         };
+
+        log('Built browser profile — video: %s, audio: %s, mkv: %s, hls: %s',
+            mp4VideoCodecs.join(','), mp4AudioCodecs.join(','), hasMkv, hasHls);
+        log('DirectPlayProfiles: %O', directPlay);
+
+        return profile;
     }
 
     /**
@@ -130,7 +230,7 @@
         var url = apiClient.getUrl('Items/' + itemId + '/PlaybackInfo');
         var postData = {
             UserId: apiClient.getCurrentUserId(),
-            DeviceProfile: getWebDeviceProfile(),
+            DeviceProfile: buildBrowserProfile(),
             MaxStreamingBitrate: 120000000,
             StartTimeTicks: 0,
             AutoOpenLiveStream: false
