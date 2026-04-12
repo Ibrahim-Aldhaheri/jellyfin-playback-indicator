@@ -11,7 +11,7 @@
                 "version": "0.1.0",
                 "changelog": "Initial alpha release — basic badge injection on episode/movie rows",
                 "targetAbi": "10.11.0.0",
-                "sourceUrl": "https://github.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/releases/download/0.1.0/jellyfin-playback-indicator-0.1.0.zip",
+                "sourceUrl": "https://raw.githubusercontent.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/main/releases/jellyfin-playback-indicator-0.1.0.zip",
                 "checksum": "252a1597791a4bc8bdcf78dda75eb5bc3ac8738ff746e323fa12fccd7a6cca9b",
                 "timestamp": "2026-04-12T16:00:00Z"
             }
