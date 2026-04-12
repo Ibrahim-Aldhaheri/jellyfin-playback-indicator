@@ -1,4 +1,7 @@
-# Jellyfin Playback Indicator
+# ⚠️ Jellyfin Playback Indicator
+
+> **⚠️ ALPHA — NOT PRODUCTION READY**
+> This plugin is in early development. Expect bugs, missing features, and breaking changes. Do not use on a production Jellyfin server.
 
 A Jellyfin server plugin that shows **direct play / transcode status badges** directly on episode and movie rows in the Jellyfin web UI — auto-detected from your current device, no manual profile setup required.
 
@@ -21,21 +24,26 @@ Badges are calculated on page load based on **your actual device's playback capa
 
 Results are cached for 1 hour per item to avoid hammering the API.
 
-## Installation
+## Installation (Alpha Testing)
 
-### From Source (Recommended for Testing)
+### Manual Build
 
 ```bash
-git clone https://github.com/badr-abokhalil-dev/jellyfin-playback-indicator.git
+git clone https://github.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator.git
 cd jellyfin-playback-indicator/src/Jellyfin.Plugin.PlaybackIndicator
 dotnet publish -c Release -o /path/to/jellyfin/plugins/PlaybackIndicator
 ```
 
 Then restart Jellyfin and enable the plugin from **Dashboard → Plugins**.
 
-### From Plugin Catalog
+### Via Plugin Catalog (Jellyfin 10.11+)
 
-> TBD — once the plugin is published to the official catalog.
+Add this repository URL in **Dashboard → Plugins → Catalog**:
+```
+https://raw.githubusercontent.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/main/catalog.json
+```
+
+Then find "Playback Indicator" in the catalog and install it.
 
 ## Configuration
 
@@ -54,6 +62,12 @@ Open **Dashboard → Playback Indicator** to configure:
 ## Compatibility
 
 Tested with **Jellyfin 10.11+**.
+
+## Known Issues
+
+- Badge injection may not work on all Jellyfin page themes
+- API calls are staggered per row — large seasons may take a few seconds
+- Cache key includes device ID — results may vary per device
 
 ## License
 
