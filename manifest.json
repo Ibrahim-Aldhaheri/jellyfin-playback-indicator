@@ -12,7 +12,7 @@
                 "changelog": "Fix JS loading via controller endpoint; inject script tag into index.html on plugin load",
                 "targetAbi": "10.11.0.0",
                 "sourceUrl": "https://raw.githubusercontent.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/main/releases/jellyfin-playback-indicator-0.1.0.zip",
-                "checksum": "7253e8c35fb8f65380028c21124ad603",
+                "checksum": "0d95a2297c8a922b5f182d807796626f",
                 "timestamp": "2026-04-12T17:00:00Z"
             }
         ]

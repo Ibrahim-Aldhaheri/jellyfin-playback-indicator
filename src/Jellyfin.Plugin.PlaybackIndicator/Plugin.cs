@@ -33,6 +33,12 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
 
         _logger.LogInformation("Playback Indicator plugin loading...");
 
+        if (Configuration.EnableDebugLogging)
+        {
+            _logger.LogDebug("Debug logging is enabled. Config: CacheTtl={CacheTtl}, ShowOnMovies={ShowOnMovies}, ShowOnTvShows={ShowOnTvShows}",
+                Configuration.CacheTtlSeconds, Configuration.ShowOnMovies, Configuration.ShowOnTvShows);
+        }
+
         _startupService = new PlaybackIndicatorStartupService(applicationPaths, startupServiceLogger);
 
         // Inject JS into index.html on plugin load (once per server restart)

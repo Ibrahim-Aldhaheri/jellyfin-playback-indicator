@@ -71,6 +71,14 @@
         <input type="checkbox" id="showMovies" class="checkbox" checked>
     </div>
 
+    <div class="setting-row">
+        <div>
+            <div class="setting-label">Enable Debug Logging</div>
+            <div class="setting-desc">Emit verbose debug messages in the server log and browser console.</div>
+        </div>
+        <input type="checkbox" id="debugLogging" class="checkbox">
+    </div>
+
     <button id="saveBtn" style="margin-top:16px; padding:10px 24px; background:#00a0dc; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:14px;">
         Save Settings
     </button>
@@ -90,6 +98,7 @@
             cacheTtl: 3600,
             showTv: true,
             showMovies: true,
+            debugLogging: false,
             apiBase: typeof ApiClient !== 'undefined' ? ApiClient.serverAddress() : ''
         };
 
@@ -104,9 +113,11 @@
                     document.getElementById('cacheTtl').value = cfg.CacheTtlSeconds || 3600;
                     document.getElementById('showTv').checked = cfg.ShowOnTvShows !== false;
                     document.getElementById('showMovies').checked = cfg.ShowOnMovies !== false;
+                    document.getElementById('debugLogging').checked = !!cfg.EnableDebugLogging;
                     window.PlaybackIndicatorConfig.cacheTtl = cfg.CacheTtlSeconds || 3600;
                     window.PlaybackIndicatorConfig.showTv = cfg.ShowOnTvShows !== false;
                     window.PlaybackIndicatorConfig.showMovies = cfg.ShowOnMovies !== false;
+                    window.PlaybackIndicatorConfig.debugLogging = !!cfg.EnableDebugLogging;
                 }
             })
             .catch(() => {});
@@ -115,11 +126,13 @@
             const cfg = {
                 CacheTtlSeconds: parseInt(document.getElementById('cacheTtl').value) || 3600,
                 ShowOnTvShows: document.getElementById('showTv').checked,
-                ShowOnMovies: document.getElementById('showMovies').checked
+                ShowOnMovies: document.getElementById('showMovies').checked,
+                EnableDebugLogging: document.getElementById('debugLogging').checked
             };
             window.PlaybackIndicatorConfig.cacheTtl = cfg.CacheTtlSeconds;
             window.PlaybackIndicatorConfig.showTv = cfg.ShowOnTvShows;
             window.PlaybackIndicatorConfig.showMovies = cfg.ShowOnMovies;
+            window.PlaybackIndicatorConfig.debugLogging = cfg.EnableDebugLogging;
 
             var saveUrl = typeof ApiClient !== 'undefined'
                 ? ApiClient.getUrl('Plugin/PlaybackIndicator/Settings')

@@ -27,6 +27,8 @@ public class PlaybackIndicatorStartupService
     /// </summary>
     public async Task InjectJsLoaderAsync()
     {
+        var debugEnabled = Plugin.Instance?.Configuration.EnableDebugLogging == true;
+
         // Try standard locations for index.html — Docker official image first
         var indexPaths = new[]
         {
@@ -75,6 +77,11 @@ public class PlaybackIndicatorStartupService
         {
             var html = await File.ReadAllTextAsync(indexPath);
 
+            if (debugEnabled)
+            {
+                _logger.LogDebug("Read index.html ({Length} chars) from {Path}", html.Length, indexPath);
+            }
+
             if (html.Contains(marker))
             {
                 _logger.LogInformation("JS loader already injected in {Path}, skipping.", indexPath);
@@ -84,6 +91,11 @@ public class PlaybackIndicatorStartupService
             // Inject before </head>
             if (html.Contains("</head>"))
             {
+                if (debugEnabled)
+                {
+                    _logger.LogDebug("Injecting JS loader before </head> in {Path}", indexPath);
+                }
+
                 html = html.Replace("</head>", jsLoader + "\n</head>");
             }
             else if (html.Contains("</body>"))

@@ -18,6 +18,7 @@
         cacheTtl: 3600,
         showTv: true,
         showMovies: true,
+        debugLogging: false,
         apiBase: window.ApiClient ? ApiClient.serverAddress() : ''
     };
 
@@ -27,6 +28,7 @@
     // ─── Logging ────────────────────────────────────────────────────────────
 
     function log(msg, ...args) {
+        if (!CONFIG.debugLogging) return;
         console.debug('[PlaybackIndicator]', msg, ...args);
     }
 
@@ -300,20 +302,29 @@
      * silently do nothing — no errors, no badges, no broken UI.
      */
     function init() {
-        log('PlaybackIndicator JS loaded, checking plugin availability...');
-
         var checkUrl = (CONFIG.apiBase || '') + '/Plugin/PlaybackIndicator/Settings';
         fetch(checkUrl, { credentials: 'include' })
             .then(function (r) {
                 if (r.ok) {
-                    log('Plugin API reachable, initializing router hooks.');
-                    initRouterHook();
-                } else {
-                    log('Plugin API returned ' + r.status + ', not initializing.');
+                    return r.json();
                 }
+                return null;
+            })
+            .then(function (cfg) {
+                if (!cfg) {
+                    return;
+                }
+                // Apply debug flag from server config
+                CONFIG.debugLogging = !!cfg.EnableDebugLogging;
+                if (cfg.CacheTtlSeconds) CONFIG.cacheTtl = cfg.CacheTtlSeconds;
+                if (cfg.ShowOnTvShows !== undefined) CONFIG.showTv = cfg.ShowOnTvShows;
+                if (cfg.ShowOnMovies !== undefined) CONFIG.showMovies = cfg.ShowOnMovies;
+
+                log('Plugin API reachable, debug logging enabled. Initializing router hooks.');
+                initRouterHook();
             })
             .catch(function () {
-                log('Plugin API unreachable, not initializing.');
+                // Plugin unreachable — silently do nothing
             });
     }
 

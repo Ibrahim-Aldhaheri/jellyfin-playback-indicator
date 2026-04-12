@@ -69,6 +69,12 @@ public class PlaybackIndicatorController : ControllerBase
             ?? Request.Headers["X-Emby-Client-Device-Id"].ToString()
             ?? string.Empty;
 
+        var debugEnabled = Plugin.Instance?.Configuration.EnableDebugLogging == true;
+        if (debugEnabled)
+        {
+            _logger.LogDebug("PlaybackStatus request: ItemId={ItemId}, DeviceId={DeviceId}", itemId, devId);
+        }
+
         try
         {
             var result = await _playbackInfoService.GetPlaybackStatusAsync(
@@ -76,6 +82,12 @@ public class PlaybackIndicatorController : ControllerBase
                 devId,
                 Request.Headers,
                 HttpContext.RequestAborted).ConfigureAwait(false);
+
+            if (debugEnabled)
+            {
+                _logger.LogDebug("PlaybackStatus result: ItemId={ItemId}, Status={Status}, Reason={Reason}",
+                    itemId, result.Status, result.Reason);
+            }
 
             return Ok(result);
         }

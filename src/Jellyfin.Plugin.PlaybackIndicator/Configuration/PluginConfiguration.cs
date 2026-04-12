@@ -18,4 +18,9 @@ public class PluginConfiguration : BasePluginConfiguration
     /// Whether to show badges on TV episode rows.
     /// </summary>
     public bool ShowOnTvShows { get; set; } = true;
+
+    /// <summary>
+    /// Whether to emit verbose debug log messages (server-side and client-side).
+    /// </summary>
+    public bool EnableDebugLogging { get; set; } = false;
 }
