@@ -7,6 +7,7 @@ using MediaBrowser.Controller;
 using MediaBrowser.Controller.Session;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Plugin.PlaybackIndicator.Controllers;
 
@@ -20,13 +21,16 @@ public class PlaybackIndicatorController : ControllerBase
 {
     private readonly IServerApplicationPaths _appPaths;
     private readonly PlaybackInfoService _playbackInfoService;
+    private readonly ILogger<PlaybackIndicatorController> _logger;
 
     public PlaybackIndicatorController(
         IServerApplicationPaths appPaths,
-        PlaybackInfoService playbackInfoService)
+        PlaybackInfoService playbackInfoService,
+        ILogger<PlaybackIndicatorController> logger)
     {
         _appPaths = appPaths;
         _playbackInfoService = playbackInfoService;
+        _logger = logger;
     }
 
     /// <summary>
@@ -48,6 +52,7 @@ public class PlaybackIndicatorController : ControllerBase
             return Unauthorized();
 
         Plugin.Instance.UpdateConfiguration(config);
+        _logger.LogInformation("Plugin configuration updated.");
         return Ok();
     }
 
@@ -76,6 +81,7 @@ public class PlaybackIndicatorController : ControllerBase
         }
         catch (Exception ex)
         {
+            _logger.LogError(ex, "Error getting playback status for item {ItemId}", itemId);
             return StatusCode(500, new { error = ex.Message });
         }
     }
@@ -93,10 +99,14 @@ public class PlaybackIndicatorController : ControllerBase
         using var stream = typeof(PlaybackIndicatorController).Assembly
             .GetManifestResourceStream(resourceName);
         if (stream is null)
+        {
+            _logger.LogError("Embedded resource {Resource} not found.", resourceName);
             return NotFound(new { error = "playback-indicator.js not found as embedded resource" });
+        }
 
         using var reader = new StreamReader(stream);
         var js = reader.ReadToEnd();
+        _logger.LogDebug("Serving playback-indicator.js ({Length} bytes)", js.Length);
         return Content(js, "application/javascript");
     }
 }

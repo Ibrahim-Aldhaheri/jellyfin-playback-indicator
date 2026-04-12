@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Threading.Tasks;
 using MediaBrowser.Common.Configuration;
+using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Plugin.PlaybackIndicator.Services;
 
@@ -12,10 +13,12 @@ namespace Jellyfin.Plugin.PlaybackIndicator.Services;
 public class PlaybackIndicatorStartupService
 {
     private readonly IApplicationPaths _appPaths;
+    private readonly ILogger<PlaybackIndicatorStartupService> _logger;
 
-    public PlaybackIndicatorStartupService(IApplicationPaths appPaths)
+    public PlaybackIndicatorStartupService(IApplicationPaths appPaths, ILogger<PlaybackIndicatorStartupService> logger)
     {
         _appPaths = appPaths;
+        _logger = logger;
     }
 
     /// <summary>
@@ -24,9 +27,10 @@ public class PlaybackIndicatorStartupService
     /// </summary>
     public async Task InjectJsLoaderAsync()
     {
-        // Try standard locations for index.html
+        // Try standard locations for index.html — Docker official image first
         var indexPaths = new[]
         {
+            "/jellyfin/jellyfin-web/index.html",
             Path.Combine(_appPaths.DataPath, "jellyfin-web", "index.html"),
             Path.Combine(_appPaths.DataPath, "web", "index.html"),
             "/usr/share/jellyfin/web/index.html",
@@ -36,6 +40,7 @@ public class PlaybackIndicatorStartupService
         string? indexPath = null;
         foreach (var p in indexPaths)
         {
+            _logger.LogDebug("Checking for index.html at: {Path}", p);
             if (File.Exists(p))
             {
                 indexPath = p;
@@ -45,10 +50,13 @@ public class PlaybackIndicatorStartupService
 
         if (indexPath is null)
         {
-            Console.WriteLine(
-                "[PlaybackIndicator] Could not find index.html in any known location.");
+            _logger.LogError(
+                "Could not find index.html in any known location. Checked: {Paths}",
+                string.Join(", ", indexPaths));
             return;
         }
+
+        _logger.LogInformation("Found index.html at: {Path}", indexPath);
 
         var marker = "<!-- PlaybackIndicator:js-injected -->";
         var jsLoader = @"
@@ -69,7 +77,7 @@ public class PlaybackIndicatorStartupService
 
             if (html.Contains(marker))
             {
-                Console.WriteLine("[PlaybackIndicator] JS loader already injected, skipping.");
+                _logger.LogInformation("JS loader already injected in {Path}, skipping.", indexPath);
                 return;
             }
 
@@ -80,28 +88,72 @@ public class PlaybackIndicatorStartupService
             }
             else if (html.Contains("</body>"))
             {
+                _logger.LogWarning("No </head> tag found, injecting before </body> instead.");
                 html = html.Replace("</body>", jsLoader + "\n</body>");
             }
             else
             {
-                Console.WriteLine("[PlaybackIndicator] Could not find </head> or </body> in index.html");
+                _logger.LogError("Could not find </head> or </body> in {Path}", indexPath);
                 return;
             }
 
             await File.WriteAllTextAsync(indexPath, html);
-            Console.WriteLine($"[PlaybackIndicator] Injected JS loader into {indexPath}");
+            _logger.LogInformation("Successfully injected JS loader into {Path}", indexPath);
         }
         catch (UnauthorizedAccessException ex)
         {
-            Console.WriteLine(
-                $"[PlaybackIndicator] Access denied writing {indexPath}. "
-                + "If running in Docker, map index.html as a volume: "
-                + "- /path/to/your/jellyfin/config/index.html:/usr/share/jellyfin/web/index.html. "
-                + $"Error: {ex.Message}");
+            _logger.LogError(ex,
+                "Access denied writing {Path}. If running in Docker, ensure the web directory is writable.",
+                indexPath);
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[PlaybackIndicator] Failed to inject JS loader into {indexPath}: {ex.Message}");
+            _logger.LogError(ex, "Failed to inject JS loader into {Path}", indexPath);
+        }
+    }
+
+    /// <summary>
+    /// Removes the injected script tag from index.html (for cleanup/uninstall).
+    /// </summary>
+    public async Task RemoveJsLoaderAsync()
+    {
+        var marker = "<!-- PlaybackIndicator:js-injected -->";
+        var indexPaths = new[]
+        {
+            "/jellyfin/jellyfin-web/index.html",
+            Path.Combine(_appPaths.DataPath, "jellyfin-web", "index.html"),
+            Path.Combine(_appPaths.DataPath, "web", "index.html"),
+            "/usr/share/jellyfin/web/index.html",
+            "C:\\ProgramData\\Jellyfin\\Server\\web\\index.html"
+        };
+
+        foreach (var p in indexPaths)
+        {
+            if (!File.Exists(p)) continue;
+
+            try
+            {
+                var html = await File.ReadAllTextAsync(p);
+                if (!html.Contains(marker)) continue;
+
+                // Remove the entire injected block
+                var startIdx = html.IndexOf("\n" + marker, StringComparison.Ordinal);
+                if (startIdx < 0)
+                    startIdx = html.IndexOf(marker, StringComparison.Ordinal);
+
+                var endMarker = "</script>";
+                var endIdx = html.IndexOf(endMarker, startIdx, StringComparison.Ordinal);
+                if (endIdx > startIdx)
+                {
+                    html = html.Remove(startIdx, endIdx - startIdx + endMarker.Length);
+                    await File.WriteAllTextAsync(p, html);
+                    _logger.LogInformation("Removed JS loader injection from {Path}", p);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to remove JS loader from {Path}", p);
+            }
         }
     }
 }

@@ -294,9 +294,27 @@
 
     // ─── Init ──────────────────────────────────────────────────────────────
 
+    /**
+     * Self-healing: verify the plugin API is reachable before initializing.
+     * If the plugin has been uninstalled, the JS endpoint will 404 and we
+     * silently do nothing — no errors, no badges, no broken UI.
+     */
     function init() {
-        log('PlaybackIndicator JS loaded', CONFIG);
-        initRouterHook();
+        log('PlaybackIndicator JS loaded, checking plugin availability...');
+
+        var checkUrl = (CONFIG.apiBase || '') + '/Plugin/PlaybackIndicator/Settings';
+        fetch(checkUrl, { credentials: 'include' })
+            .then(function (r) {
+                if (r.ok) {
+                    log('Plugin API reachable, initializing router hooks.');
+                    initRouterHook();
+                } else {
+                    log('Plugin API returned ' + r.status + ', not initializing.');
+                }
+            })
+            .catch(function () {
+                log('Plugin API unreachable, not initializing.');
+            });
     }
 
     if (document.readyState === 'loading') {

@@ -7,6 +7,7 @@ using MediaBrowser.Common.Configuration;
 using MediaBrowser.Common.Plugins;
 using MediaBrowser.Model.Plugins;
 using MediaBrowser.Model.Serialization;
+using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Plugin.PlaybackIndicator;
 
@@ -18,14 +19,26 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
     public const string PluginGuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
 
     private readonly PlaybackIndicatorStartupService _startupService;
+    private readonly ILogger<Plugin> _logger;
 
-    public Plugin(IApplicationPaths applicationPaths, IXmlSerializer xmlSerializer)
+    public Plugin(
+        IApplicationPaths applicationPaths,
+        IXmlSerializer xmlSerializer,
+        ILogger<Plugin> logger,
+        ILogger<PlaybackIndicatorStartupService> startupServiceLogger)
         : base(applicationPaths, xmlSerializer)
     {
         Instance = this;
-        _startupService = new PlaybackIndicatorStartupService(applicationPaths);
+        _logger = logger;
+
+        _logger.LogInformation("Playback Indicator plugin loading...");
+
+        _startupService = new PlaybackIndicatorStartupService(applicationPaths, startupServiceLogger);
+
         // Inject JS into index.html on plugin load (once per server restart)
         _startupService.InjectJsLoaderAsync().GetAwaiter().GetResult();
+
+        _logger.LogInformation("Playback Indicator plugin loaded successfully.");
     }
 
     public override string Name => "Playback Indicator";
