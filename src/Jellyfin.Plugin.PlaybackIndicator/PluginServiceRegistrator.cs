@@ -12,6 +12,7 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
     /// <inheritdoc />
     public void RegisterServices(IServiceCollection serviceCollection, IServerApplicationHost applicationHost)
     {
-        serviceCollection.AddSingleton<PlaybackInfoService>();
+        // Detection is now done client-side via Jellyfin's built-in PlaybackInfo API.
+        // No server-side services needed beyond the controller.
     }
 }

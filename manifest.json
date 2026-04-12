@@ -9,10 +9,10 @@
         "versions": [
             {
                 "version": "0.1.0.0",
-                "changelog": "Client-aware DirectPlay detection (MKV direct play on mobile/native apps), fix movie detail page badge",
+                "changelog": "Use Jellyfin built-in PlaybackInfo API for universal DirectPlay/Stream/Transcode detection, fix movie detail badge",
                 "targetAbi": "10.11.0.0",
                 "sourceUrl": "https://raw.githubusercontent.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/main/releases/jellyfin-plugin-playbackindicator-0.1.0.0.zip",
-                "checksum": "1ab36d3c760a6fd4529821ad15ca31ad",
+                "checksum": "c554aa2fa28b4f96f0eb535ab512339b",
                 "timestamp": "2026-04-12T23:00:00Z"
             }
         ]

@@ -3,6 +3,9 @@
  *
  * Hooks into Jellyfin's SPA, detects series/movie pages,
  * and injects direct-play / transcode status badges on each item.
+ *
+ * Detection uses Jellyfin's built-in PlaybackInfo API which returns
+ * the exact play method for the current client/device automatically.
  */
 
 (function () {
@@ -59,10 +62,16 @@
         return window.ApiClient || (window.Emby && window.Emby.ApiClient) || null;
     }
 
+    /**
+     * Calls Jellyfin's built-in PlaybackInfo API to determine the exact
+     * play method (DirectPlay / DirectStream / Transcode) for this client.
+     * This is the same API Jellyfin's own web player uses — it automatically
+     * uses the correct device profile for whatever client is making the request.
+     */
     function fetchPlaybackStatus(itemId) {
         var cached = getCached(itemId);
         if (cached) {
-            log('Cache hit for %s: %s', itemId, cached.Status || cached.status);
+            log('Cache hit for %s: %s', itemId, cached.Status);
             return Promise.resolve(cached);
         }
 
@@ -72,17 +81,57 @@
             return Promise.resolve({ Status: 'Unknown', Reason: 'No ApiClient' });
         }
 
-        var url = apiClient.getUrl('Plugin/PlaybackIndicator/PlaybackStatus/' + itemId);
-        log('Fetching playback status: %s', url);
+        var userId = apiClient.getCurrentUserId();
+        var url = apiClient.getUrl('Items/' + itemId + '/PlaybackInfo', { userId: userId });
+        log('Fetching PlaybackInfo: %s', url);
 
-        return apiClient.getJSON(url).then(function (data) {
-            log('Got status for %s: %O', itemId, data);
-            setCache(itemId, data);
-            return data;
+        return apiClient.getJSON(url).then(function (playbackInfo) {
+            log('PlaybackInfo for %s: %O', itemId, playbackInfo);
+
+            var result = parsePlaybackInfo(playbackInfo);
+            result.ItemId = itemId;
+
+            log('Determined status for %s: %s (%s)', itemId, result.Status, result.Reason);
+            setCache(itemId, result);
+            return result;
         }).catch(function (err) {
-            log('API error for %s: %O', itemId, err);
+            log('PlaybackInfo API error for %s: %O', itemId, err);
             return { Status: 'Unknown', Reason: String(err) };
         });
+    }
+
+    /**
+     * Parses Jellyfin's PlaybackInfoResponse to determine play method.
+     *
+     * MediaSources[0]:
+     *   - SupportsDirectPlay = true  → DirectPlay
+     *   - SupportsDirectStream = true → DirectStream (remux, no re-encode)
+     *   - TranscodingUrl exists      → Transcode
+     */
+    function parsePlaybackInfo(info) {
+        if (!info || !info.MediaSources || info.MediaSources.length === 0) {
+            return { Status: 'Unknown', Reason: 'No media sources' };
+        }
+
+        var source = info.MediaSources[0];
+
+        if (source.SupportsDirectPlay) {
+            return { Status: 'DirectPlay', Reason: 'Direct Play — no conversion needed' };
+        }
+
+        if (source.SupportsDirectStream) {
+            return { Status: 'DirectStream', Reason: 'Direct Stream — container remux, no re-encoding' };
+        }
+
+        if (source.TranscodingUrl) {
+            var reason = 'Transcode required';
+            if (source.TranscodingSubProtocol) {
+                reason += ' (' + source.TranscodingSubProtocol + ')';
+            }
+            return { Status: 'WillTranscode', Reason: reason };
+        }
+
+        return { Status: 'Unknown', Reason: 'Could not determine play method' };
     }
 
     // ─── Badge rendering ────────────────────────────────────────────────────
@@ -95,7 +144,6 @@
         'Unknown':        { icon: '\u2753', label: 'Unknown',         cls: 'jpi-unknown' }
     };
 
-    // Inject theme-aware CSS once
     function injectStyles() {
         if (document.getElementById('jpi-styles')) return;
         var style = document.createElement('style');
@@ -107,7 +155,6 @@
             '.jpi-will-transcode{background:rgba(230,81,0,0.15);color:#ff9800}',
             '.jpi-transcoding{background:rgba(198,40,40,0.15);color:#ef5350}',
             '.jpi-unknown{background:rgba(117,117,117,0.15);color:#9e9e9e}',
-            // Light theme overrides — Jellyfin adds .skin-light or similar
             '@media(prefers-color-scheme:light){',
             '  .jpi-direct-play{background:rgba(46,125,50,0.12);color:#2e7d32}',
             '  .jpi-direct-stream{background:rgba(21,101,192,0.12);color:#1565c0}',
@@ -129,17 +176,14 @@
     }
 
     function injectBadge(el, status, reason) {
-        // Remove existing badge if any
         var existing = el.querySelectorAll('.' + BADGE_CLASS);
         for (var i = 0; i < existing.length; i++) existing[i].remove();
 
-        // For card items, inject into the card footer text area
         var nameEl = el.querySelector('.cardText, .listItemBodyText, .listItemBody, .cardFooter');
         if (nameEl) {
             nameEl.insertAdjacentHTML('afterend', ' ' + badgeHtml(status, reason));
             log('Badge injected after %s in %s', nameEl.className, el.className);
         } else {
-            // Fallback: append to the element
             el.insertAdjacentHTML('beforeend', badgeHtml(status, reason));
             log('Badge injected (fallback) into %s', el.className);
         }
@@ -151,8 +195,6 @@
         var items = [];
         var seen = {};
 
-        // Jellyfin 10.11 uses [data-id] on both .card and .listItem elements
-        // data-type indicates the item type: Episode, Movie, Series, Season, etc.
         var selectors = [];
 
         if (CONFIG.showTv) {
@@ -188,7 +230,6 @@
     // ─── Detail page badge ───────────────────────────────────────────────
 
     function tryInjectDetailPageBadge() {
-        // Detect detail page by URL pattern — Jellyfin uses #!/details?id=GUID
         var hash = window.location.hash || '';
         var href = window.location.href || '';
         var fullUrl = hash + ' ' + href;
@@ -199,7 +240,6 @@
             return;
         }
 
-        // Extract item ID from URL — GUIDs contain hex chars AND dashes
         var itemId = null;
         var idMatch = fullUrl.match(/[?&]id=([a-f0-9-]+)/i);
         if (idMatch) {
@@ -211,14 +251,10 @@
             return;
         }
 
-        // Determine if this is a movie or episode detail page
-        // Check URL for type hint, or inspect the page content
         var isMovie = /type=Movie/i.test(fullUrl);
         var isEpisode = /type=Episode/i.test(fullUrl);
 
-        // If no type in URL, allow badge for both movies and episodes based on config
         if (!isMovie && !isEpisode) {
-            // Could be either — allow if at least one type is enabled
             if (!CONFIG.showMovies && !CONFIG.showTv) return;
         } else {
             if (isMovie && !CONFIG.showMovies) return;
@@ -227,64 +263,41 @@
 
         log('Detail page detected for item %s', itemId);
 
-        // Find the detail page container — try multiple selectors for Jellyfin 10.11
-        var detailSelectors = [
-            '.detailPagePrimaryContainer',
-            '.detailPageContent',
-            '.itemDetailPage',
-            'div[is="emby-itemscontainer"]',
-            '.page:not(.hide)',
-            '.mainDetailInfo'
-        ];
-
-        var detailContainer = null;
-        for (var i = 0; i < detailSelectors.length; i++) {
-            detailContainer = document.querySelector(detailSelectors[i]);
-            if (detailContainer) {
-                log('Detail container found with selector: %s', detailSelectors[i]);
-                break;
-            }
+        // Jellyfin 10.11 detail page DOM structure:
+        // #itemDetailPage > .detailPageWrapperContainer > .detailPagePrimaryContainer
+        //   > .detailRibbon > .infoWrapper > .itemMiscInfo-primary / .itemMiscInfo-secondary
+        var detailPage = document.getElementById('itemDetailPage');
+        if (!detailPage) {
+            detailPage = document.querySelector('.itemDetailPage');
         }
 
-        if (!detailContainer) {
-            // Last resort: use the visible page
-            detailContainer = document.querySelector('.page:not(.hide)') || document.body;
-            log('Using fallback detail container: %s', detailContainer.className);
+        if (!detailPage) {
+            log('Detail page container #itemDetailPage not found');
+            return;
         }
 
-        // Don't re-inject if badge already exists
-        if (detailContainer.querySelector('.' + BADGE_CLASS)) return;
+        if (detailPage.querySelector('.' + BADGE_CLASS)) return;
 
-        // Find injection point — prefer media info area, then title area
-        var injectSelectors = [
-            '.mediaInfoPrimary',
-            '.mediaInfoContent',
-            '.infoWrapper',
-            '.mainDetailInfo',
-            '.detailPageWrapperContainer',
-            '.itemName',
-            'h1', 'h2', 'h3'
-        ];
-
-        var injectTarget = null;
-        for (var j = 0; j < injectSelectors.length; j++) {
-            injectTarget = detailContainer.querySelector(injectSelectors[j]);
-            if (injectTarget) {
-                log('Inject target found with selector: %s', injectSelectors[j]);
-                break;
-            }
-        }
+        // Inject after the primary or secondary misc info line in the ribbon
+        var injectTarget =
+            detailPage.querySelector('.itemMiscInfo-primary') ||
+            detailPage.querySelector('.itemMiscInfo-secondary') ||
+            detailPage.querySelector('.itemMiscInfo') ||
+            detailPage.querySelector('.infoWrapper') ||
+            detailPage.querySelector('.nameContainer');
 
         if (!injectTarget) {
-            injectTarget = detailContainer;
+            log('No suitable injection target found on detail page');
+            return;
         }
 
+        log('Detail badge injection target: %s', injectTarget.className);
+
         fetchPlaybackStatus(itemId).then(function (data) {
-            // Check again in case it was injected while waiting
-            if (detailContainer.querySelector('.' + BADGE_CLASS)) return;
-            var html = badgeHtml(data.Status || data.status, data.Reason || data.reason, 'jpi-detail-badge');
+            if (detailPage.querySelector('.' + BADGE_CLASS)) return;
+            var html = badgeHtml(data.Status, data.Reason, 'jpi-detail-badge');
             injectTarget.insertAdjacentHTML('afterend', html);
-            log('Detail page badge injected for %s: %s', itemId, data.Status || data.status);
+            log('Detail page badge injected for %s: %s', itemId, data.Status);
         });
     }
 
@@ -294,7 +307,6 @@
     var pendingProcess = false;
 
     function processVisibleItems() {
-        // Always try the detail page badge (independent of card/list processing)
         tryInjectDetailPageBadge();
 
         if (processing) {
@@ -332,8 +344,7 @@
             }
 
             fetchPlaybackStatus(itemId).then(function (data) {
-                injectBadge(el, data.Status || data.status, data.Reason || data.reason);
-                // Stagger: 100ms between requests
+                injectBadge(el, data.Status, data.Reason);
                 setTimeout(processNext, 100);
             }).catch(function (e) {
                 log('Error processing item %s: %O', itemId, e);
@@ -349,8 +360,6 @@
     function initRouterHook() {
         log('Initializing router hooks...');
 
-        // Method 1: MutationObserver on the main app container
-        // This is the most reliable way to detect new content in the SPA
         var debounceTimer = null;
         var observer = new MutationObserver(function (mutations) {
             var dominated = false;
@@ -360,23 +369,11 @@
                     for (var j = 0; j < m.addedNodes.length; j++) {
                         var node = m.addedNodes[j];
                         if (node.nodeType === Node.ELEMENT_NODE) {
-                            // Trigger on data-id elements (list/card items)
                             if ((node.getAttribute && node.getAttribute('data-id')) ||
-                                (node.querySelector && node.querySelector('[data-id]'))) {
-                                dominated = true;
-                                break;
-                            }
-                            // Also trigger on detail page content being added
-                            if (node.classList && (
-                                node.classList.contains('detailPagePrimaryContainer') ||
-                                node.classList.contains('mainDetailInfo') ||
-                                node.classList.contains('itemDetailPage') ||
-                                node.classList.contains('detailPageContent'))) {
-                                dominated = true;
-                                break;
-                            }
-                            // Check if added node contains detail page elements
-                            if (node.querySelector && node.querySelector('.detailPagePrimaryContainer, .mainDetailInfo')) {
+                                (node.querySelector && node.querySelector('[data-id]')) ||
+                                (node.id === 'itemDetailPage') ||
+                                (node.classList && node.classList.contains('itemDetailPage')) ||
+                                (node.querySelector && node.querySelector('#itemDetailPage, .itemMiscInfo'))) {
                                 dominated = true;
                                 break;
                             }
@@ -391,30 +388,25 @@
             }
         });
 
-        // Watch the app body — Jellyfin renders everything inside .skinBody or body
         var watchTarget = document.querySelector('.skinBody') || document.body;
         observer.observe(watchTarget, { childList: true, subtree: true });
         log('MutationObserver watching: %s (class=%s)', watchTarget.tagName, watchTarget.className);
 
-        // Method 2: Listen for viewshow event — Jellyfin fires this when a page view becomes active
         document.addEventListener('viewshow', function (e) {
             log('viewshow event fired: %O', e.target && e.target.className);
             setTimeout(processVisibleItems, 800);
         });
 
-        // Method 3: hashchange for hash-based routing (#!/...)
         window.addEventListener('hashchange', function () {
             log('hashchange: %s', window.location.hash);
             setTimeout(processVisibleItems, 1000);
         });
 
-        // Method 4: popstate for history-based routing
         window.addEventListener('popstate', function () {
             log('popstate: %s', window.location.href);
             setTimeout(processVisibleItems, 1000);
         });
 
-        // Check current page immediately
         log('Checking current page on init...');
         setTimeout(processVisibleItems, 1500);
     }
@@ -431,7 +423,6 @@
             return;
         }
 
-        // Fetch server config to apply settings
         var settingsUrl = apiClient.getUrl('Plugin/PlaybackIndicator/Settings');
         log('Fetching settings from: %s', settingsUrl);
 
@@ -458,7 +449,6 @@
         });
     }
 
-    // Wait for ApiClient to be available
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', function () {
             setTimeout(init, 1000);
