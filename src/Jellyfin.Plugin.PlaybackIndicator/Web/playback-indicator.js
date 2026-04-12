@@ -19,7 +19,7 @@
     };
 
     var BADGE_CLASS = 'jpi-badge';
-    var CACHE_PREFIX = 'jpi_cache_';
+    var CACHE_PREFIX = 'jpi_';
 
     // ─── Logging ────────────────────────────────────────────────────────────
 
@@ -32,13 +32,27 @@
 
     // ─── Cache ─────────────────────────────────────────────────────────────
 
+    function getDeviceId() {
+        try {
+            var apiClient = getApiClient();
+            if (apiClient) {
+                return apiClient.deviceId() || apiClient.getDeviceId() || apiClient._deviceId || 'default';
+            }
+        } catch (e) {}
+        return 'default';
+    }
+
+    function cacheKey(itemId) {
+        return CACHE_PREFIX + getDeviceId() + '_' + itemId;
+    }
+
     function getCached(itemId) {
         try {
-            var raw = localStorage.getItem(CACHE_PREFIX + itemId);
+            var raw = localStorage.getItem(cacheKey(itemId));
             if (!raw) return null;
             var parsed = JSON.parse(raw);
             if (Date.now() > parsed.expiry) {
-                localStorage.removeItem(CACHE_PREFIX + itemId);
+                localStorage.removeItem(cacheKey(itemId));
                 return null;
             }
             return parsed.data;
@@ -49,7 +63,7 @@
 
     function setCache(itemId, data) {
         try {
-            localStorage.setItem(CACHE_PREFIX + itemId, JSON.stringify({
+            localStorage.setItem(cacheKey(itemId), JSON.stringify({
                 data: data,
                 expiry: Date.now() + CONFIG.cacheTtl * 1000
             }));
@@ -149,7 +163,9 @@
         var style = document.createElement('style');
         style.id = 'jpi-styles';
         style.textContent = [
-            '.jpi-badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;white-space:nowrap;line-height:1.4;vertical-align:middle}',
+            '.jpi-badge{display:inline-flex;align-items:center;justify-content:center;gap:4px;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;white-space:nowrap;line-height:1;vertical-align:middle}',
+            '.jpi-badge .jpi-icon{display:inline-flex;align-items:center;font-size:12px}',
+            '.jpi-badge .jpi-label{display:inline-flex;align-items:center}',
             '.jpi-direct-play{background:rgba(46,125,50,0.15);color:#4caf50}',
             '.jpi-direct-stream{background:rgba(21,101,192,0.15);color:#42a5f5}',
             '.jpi-will-transcode{background:rgba(230,81,0,0.15);color:#ff9800}',
@@ -172,7 +188,7 @@
         var cfg = badgeConfig[key] || badgeConfig['Unknown'];
         var cls = BADGE_CLASS + ' ' + cfg.cls + (extraClass ? ' ' + extraClass : '');
 
-        return '<span class="' + cls + '" title="' + (reason || cfg.label).replace(/"/g, '&quot;') + '">' + cfg.icon + ' ' + cfg.label + '</span>';
+        return '<span class="' + cls + '" title="' + (reason || cfg.label).replace(/"/g, '&quot;') + '"><span class="jpi-icon">' + cfg.icon + '</span><span class="jpi-label">' + cfg.label + '</span></span>';
     }
 
     function injectBadge(el, status, reason) {

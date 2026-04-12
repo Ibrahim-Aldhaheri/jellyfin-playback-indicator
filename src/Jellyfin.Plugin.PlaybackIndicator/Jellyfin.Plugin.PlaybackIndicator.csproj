@@ -9,7 +9,7 @@
     <RootNamespace>Jellyfin.Plugin.PlaybackIndicator</RootNamespace>
     <Description>Shows direct play / transcode status badges on episode and movie rows, auto-detected from the current device.</Description>
     <PackageTags>jellyfin;plugin;playback;directplay;transcode</PackageTags>
-    <Version>0.1.0.0</Version>
+    <Version>0.2.0.0</Version>
     <Authors>Badr</Authors>
     <LangVersion>latest</LangVersion>
   </PropertyGroup>

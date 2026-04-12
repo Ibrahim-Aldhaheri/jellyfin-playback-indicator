@@ -8,6 +8,14 @@
         "category": "General",
         "versions": [
             {
+                "version": "0.2.0.0",
+                "changelog": "Device-specific cache keys fix cross-device wrong status, badge text alignment fix",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://raw.githubusercontent.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/main/releases/jellyfin-plugin-playbackindicator-0.2.0.0.zip",
+                "checksum": "436867f425bf4a6d5fe006eb97f1be06",
+                "timestamp": "2026-04-12T00:00:00Z"
+            },
+            {
                 "version": "0.1.0.0",
                 "changelog": "Use Jellyfin built-in PlaybackInfo API for universal DirectPlay/Stream/Transcode detection, fix movie detail badge",
                 "targetAbi": "10.11.0.0",
