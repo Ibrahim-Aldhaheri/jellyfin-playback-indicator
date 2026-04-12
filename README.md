@@ -63,11 +63,17 @@ Open **Dashboard → Playback Indicator** to configure:
 
 Tested with **Jellyfin 10.11+**.
 
-## Known Issues
+## Known Limitations
 
-- Badge injection may not work on all Jellyfin page themes
+> **⚠️ The plugin may show incorrect playback status in some cases.** Determining the exact play method (Direct Play vs Direct Stream vs Transcode) depends on many factors — device capabilities, browser codec support, audio codec handling, subtitle burn-in requirements, and Jellyfin's internal transcoding decisions. The plugin uses the browser's `canPlayType()` API to build a device profile, but this doesn't always perfectly match what Jellyfin's player actually negotiates at playback time.
+
+- **Accuracy varies by client** — Desktop browsers, Android apps, TV apps, and iOS apps all report different codec support. Results may not match what actually happens during playback.
+- **Audio codecs** — Some audio formats (AC3, EAC3, DTS) may be reported differently than how Jellyfin handles them at play time.
+- **Subtitle burn-in** — If Jellyfin needs to burn in subtitles, it will transcode even if video/audio are compatible. The plugin doesn't always account for this.
+- Badge injection may not work on all Jellyfin page themes or custom CSS
 - API calls are staggered per row — large seasons may take a few seconds
-- Cache key includes device ID — results may vary per device
+- Cache is device-specific — results correctly vary per device
+- Movie detail page badge may not appear on all layouts
 
 ## License
 
