@@ -1,50 +1,45 @@
 /**
  * Jellyfin Playback Indicator — Client-side badge injector
  *
- * Hooks into Jellyfin's SPA router, detects series/movie pages,
- * and injects direct-play / transcode status badges on each row.
- *
- * Badge states:
- *   ✅ Direct Play  — green  — container + video + audio all compatible
- *   ⚠️ Will Transcode — amber — codec/container/bitrate requires transcoding
- *   🔄 Transcoding  — red   — currently being transcoded (during playback)
- *   ❓ Unknown      — grey   — could not determine status
+ * Hooks into Jellyfin's SPA, detects series/movie pages,
+ * and injects direct-play / transcode status badges on each item.
  */
 
 (function () {
     'use strict';
 
-    const CONFIG = window.PlaybackIndicatorConfig || {
+    var CONFIG = {
         cacheTtl: 3600,
         showTv: true,
         showMovies: true,
-        debugLogging: false,
-        apiBase: window.ApiClient ? ApiClient.serverAddress() : ''
+        debugLogging: true
     };
 
-    const BADGE_CLASS = 'jpi-badge';
-    const CACHE_PREFIX = 'jpi_cache_';
+    var BADGE_CLASS = 'jpi-badge';
+    var CACHE_PREFIX = 'jpi_cache_';
 
     // ─── Logging ────────────────────────────────────────────────────────────
 
-    function log(msg, ...args) {
+    function log(msg) {
         if (!CONFIG.debugLogging) return;
-        console.debug('[PlaybackIndicator]', msg, ...args);
+        var args = Array.prototype.slice.call(arguments);
+        args[0] = '[PlaybackIndicator] ' + args[0];
+        console.debug.apply(console, args);
     }
 
     // ─── Cache ─────────────────────────────────────────────────────────────
 
     function getCached(itemId) {
         try {
-            const raw = localStorage.getItem(CACHE_PREFIX + itemId);
+            var raw = localStorage.getItem(CACHE_PREFIX + itemId);
             if (!raw) return null;
-            const { data, expiry } = JSON.parse(raw);
-            if (Date.now() > expiry) {
+            var parsed = JSON.parse(raw);
+            if (Date.now() > parsed.expiry) {
                 localStorage.removeItem(CACHE_PREFIX + itemId);
                 return null;
             }
-            return data;
-        } catch {
+            return parsed.data;
+        } catch (e) {
             return null;
         }
     }
@@ -52,286 +47,276 @@
     function setCache(itemId, data) {
         try {
             localStorage.setItem(CACHE_PREFIX + itemId, JSON.stringify({
-                data,
+                data: data,
                 expiry: Date.now() + CONFIG.cacheTtl * 1000
             }));
-        } catch {}
+        } catch (e) {}
     }
 
     // ─── API ────────────────────────────────────────────────────────────────
 
+    function getApiClient() {
+        return window.ApiClient || (window.Emby && window.Emby.ApiClient) || null;
+    }
+
     function fetchPlaybackStatus(itemId) {
-        const cached = getCached(itemId);
+        var cached = getCached(itemId);
         if (cached) {
-            log('Cache hit for', itemId, cached.status);
+            log('Cache hit for %s: %s', itemId, cached.Status || cached.status);
             return Promise.resolve(cached);
         }
 
-        const url = `${CONFIG.apiBase}/Plugin/PlaybackIndicator/PlaybackStatus/${itemId}`;
-        return fetch(url, { credentials: 'include' })
-            .then(r => r.json())
-            .then(data => {
-                setCache(itemId, data);
-                return data;
-            })
-            .catch(err => {
-                log('API error for', itemId, err);
-                return { status: 'unknown', reason: err.message };
-            });
+        var apiClient = getApiClient();
+        if (!apiClient) {
+            log('No ApiClient available, cannot fetch status');
+            return Promise.resolve({ Status: 'Unknown', Reason: 'No ApiClient' });
+        }
+
+        var url = apiClient.getUrl('Plugin/PlaybackIndicator/PlaybackStatus/' + itemId);
+        log('Fetching playback status: %s', url);
+
+        return apiClient.getJSON(url).then(function (data) {
+            log('Got status for %s: %O', itemId, data);
+            setCache(itemId, data);
+            return data;
+        }).catch(function (err) {
+            log('API error for %s: %O', itemId, err);
+            return { Status: 'Unknown', Reason: String(err) };
+        });
     }
 
     // ─── Badge rendering ────────────────────────────────────────────────────
 
+    var badgeConfig = {
+        'DirectPlay':     { icon: '\u2705', label: 'Direct Play',     bg: '#e8f5e9', fg: '#2e7d32' },
+        'DirectStream':   { icon: '\uD83D\uDCA7', label: 'Direct Stream',   bg: '#e3f2fd', fg: '#1565c0' },
+        'WillTranscode':  { icon: '\u26A0\uFE0F', label: 'Will Transcode',  bg: '#fff3e0', fg: '#e65100' },
+        'Transcoding':    { icon: '\uD83D\uDD04', label: 'Transcoding',     bg: '#ffebee', fg: '#c62828' },
+        'Unknown':        { icon: '\u2753', label: 'Unknown',         bg: '#f5f5f5', fg: '#757575' }
+    };
+
     function badgeHtml(status, reason) {
-        const icons = {
-            'direct_play':    '✅',
-            'direct_stream':  '💧',
-            'will_transcode': '⚠️',
-            'transcoding':    '🔄',
-            'unknown':        '❓'
-        };
-        const labels = {
-            'direct_play':    'Direct Play',
-            'direct_stream':  'Direct Stream',
-            'will_transcode': 'Will Transcode',
-            'transcoding':    'Transcoding',
-            'unknown':        'Unknown'
-        };
-        const css = {
-            'direct_play':    'background:#e8f5e9;color:#2e7d32',
-            'direct_stream':  'background:#e3f2fd;color:#1565c0',
-            'will_transcode': 'background:#fff3e0;color:#e65100',
-            'transcoding':    'background:#ffebee;color:#c62828',
-            'unknown':        'background:#f5f5f5;color:#757575'
-        };
+        var key = status || 'Unknown';
+        var cfg = badgeConfig[key] || badgeConfig['Unknown'];
 
-        const key = status || 'unknown';
-        const icon = icons[key] || '❓';
-        const label = labels[key] || 'Unknown';
-        const style = css[key] || css.unknown;
-
-        return `<span class="${BADGE_CLASS}" style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;${style}" title="${reason || label}">${icon} ${label}</span>`;
+        return '<span class="' + BADGE_CLASS + '" style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;white-space:nowrap;background:' + cfg.bg + ';color:' + cfg.fg + '" title="' + (reason || cfg.label) + '">' + cfg.icon + ' ' + cfg.label + '</span>';
     }
 
     function injectBadge(el, status, reason) {
         // Remove existing badge if any
-        el.querySelectorAll('.' + BADGE_CLASS).forEach(b => b.remove());
+        var existing = el.querySelectorAll('.' + BADGE_CLASS);
+        for (var i = 0; i < existing.length; i++) existing[i].remove();
 
-        // Find a good insertion point — after the title/name element
-        const nameEl = el.querySelector('.name, .title, [data-role="button"]:not([data-action]), .flex-grow-1');
+        // For card items, inject into the card footer text area
+        var nameEl = el.querySelector('.cardText, .listItemBodyText, .listItemBody, .cardFooter');
         if (nameEl) {
-            nameEl.insertAdjacentHTML('beforeend', ' ' + badgeHtml(status, reason));
+            nameEl.insertAdjacentHTML('afterend', ' ' + badgeHtml(status, reason));
+            log('Badge injected after %s in %s', nameEl.className, el.className);
         } else {
-            // Fallback: prepend to the list item
-            el.insertAdjacentHTML('afterbegin', badgeHtml(status, reason));
+            // Fallback: append to the element
+            el.insertAdjacentHTML('beforeend', badgeHtml(status, reason));
+            log('Badge injected (fallback) into %s', el.className);
         }
     }
 
     // ─── Row discovery ─────────────────────────────────────────────────────
 
-    /**
-     * Find all episode/movie rows on the current page.
-     * Jellyfin renders these as:
-     *   - Episodes:  paper-listbox items with data-episode-id
-     *   - Movies:    card overlays with data-id
-     */
-    function findMediaRows() {
-        const rows = [];
+    function findMediaItems() {
+        var items = [];
+        var seen = {};
+
+        // Jellyfin 10.11 uses [data-id] on both .card and .listItem elements
+        // data-type indicates the item type: Episode, Movie, Series, Season, etc.
+        var selectors = [];
 
         if (CONFIG.showTv) {
-            // Episode list items in a season page
-            document.querySelectorAll('[data-episode-id], .episodeItem, paper-listbox .item').forEach(el => {
-                if (!el.querySelector('.' + BADGE_CLASS)) rows.push(el);
-            });
+            selectors.push('.listItem[data-id][data-type="Episode"]');
+            selectors.push('.card[data-id][data-type="Episode"]');
         }
 
         if (CONFIG.showMovies) {
-            // Movie cards in library view
-            document.querySelectorAll('.card, [data-id][data-type="Movie"], .libraryGrid .item').forEach(el => {
-                if (!el.querySelector('.' + BADGE_CLASS)) rows.push(el);
-            });
+            selectors.push('.listItem[data-id][data-type="Movie"]');
+            selectors.push('.card[data-id][data-type="Movie"]');
         }
 
-        return rows;
-    }
+        if (selectors.length === 0) return items;
 
-    /**
-     * Extract the media item ID from a row element.
-     */
-    function getItemId(row) {
-        return row.dataset.episodeId
-            || row.dataset.id
-            || row.getAttribute('data-id')
-            || null;
+        var allSelector = selectors.join(', ');
+        var elements = document.querySelectorAll(allSelector);
+
+        log('findMediaItems: selector "%s" matched %d elements', allSelector, elements.length);
+
+        for (var i = 0; i < elements.length; i++) {
+            var el = elements[i];
+            var id = el.getAttribute('data-id');
+            if (!id || seen[id]) continue;
+            if (el.querySelector('.' + BADGE_CLASS)) continue;
+            seen[id] = true;
+            items.push(el);
+        }
+
+        log('findMediaItems: %d unique items without badges', items.length);
+        return items;
     }
 
     // ─── Processing ────────────────────────────────────────────────────────
 
-    let processing = false;
+    var processing = false;
+    var pendingProcess = false;
 
-    async function processVisibleRows() {
-        if (processing) return;
+    function processVisibleItems() {
+        if (processing) {
+            pendingProcess = true;
+            return;
+        }
         processing = true;
 
-        const rows = findMediaRows();
-        if (rows.length === 0) {
+        var items = findMediaItems();
+        if (items.length === 0) {
             processing = false;
             return;
         }
 
-        log(`Processing ${rows.length} rows...`);
+        log('Processing %d items...', items.length);
 
-        // Stagger requests to avoid hammering the API
-        for (let i = 0; i < rows.length; i++) {
-            const row = rows[i];
-            const itemId = getItemId(row);
-
-            if (!itemId) continue;
-
-            try {
-                const status = await fetchPlaybackStatus(itemId);
-                injectBadge(row, status.status, status.reason);
-            } catch (e) {
-                log('Error processing row', itemId, e);
+        var idx = 0;
+        function processNext() {
+            if (idx >= items.length) {
+                processing = false;
+                if (pendingProcess) {
+                    pendingProcess = false;
+                    setTimeout(processVisibleItems, 500);
+                }
+                return;
             }
 
-            // Stagger: 100ms between requests
-            if (i < rows.length - 1) {
-                await new Promise(r => setTimeout(r, 100));
+            var el = items[idx];
+            var itemId = el.getAttribute('data-id');
+            idx++;
+
+            if (!itemId) {
+                processNext();
+                return;
             }
+
+            fetchPlaybackStatus(itemId).then(function (data) {
+                injectBadge(el, data.Status || data.status, data.Reason || data.reason);
+                // Stagger: 100ms between requests
+                setTimeout(processNext, 100);
+            }).catch(function (e) {
+                log('Error processing item %s: %O', itemId, e);
+                setTimeout(processNext, 100);
+            });
         }
 
-        processing = false;
+        processNext();
     }
 
     // ─── SPA Router hook ───────────────────────────────────────────────────
 
-    /**
-     * Jellyfin's web client uses a viewstack to manage page navigation.
-     * We hook into the 'viewstack' event or MutationObserver on the main content area.
-     */
     function initRouterHook() {
-        // Method 1: Listen for Jellyfin's global 'viewstackchange' event
-        window.addEventListener('viewstackchange', (e) => {
-            const stack = e.detail?.stack || [];
-            const current = stack[stack.length - 1];
-            log('View stack changed:', current);
-            if (isMediaPage(current?.type)) {
-                // Page load — wait for DOM to render
-                setTimeout(processVisibleRows, 800);
-            }
-        });
+        log('Initializing router hooks...');
 
-        // Method 2: MutationObserver as fallback — watches for new rows added to DOM
-        const observer = new MutationObserver((mutations) => {
-            let shouldProcess = false;
-            for (const m of mutations) {
+        // Method 1: MutationObserver on the main app container
+        // This is the most reliable way to detect new content in the SPA
+        var debounceTimer = null;
+        var observer = new MutationObserver(function (mutations) {
+            var dominated = false;
+            for (var i = 0; i < mutations.length; i++) {
+                var m = mutations[i];
                 if (m.addedNodes.length > 0) {
-                    for (const node of m.addedNodes) {
+                    for (var j = 0; j < m.addedNodes.length; j++) {
+                        var node = m.addedNodes[j];
                         if (node.nodeType === Node.ELEMENT_NODE) {
-                            if (node.matches?.('[data-episode-id], .episodeItem, .card')) {
-                                shouldProcess = true;
-                                break;
-                            }
-                            if (node.querySelector?.('[data-episode-id], .episodeItem, .card')) {
-                                shouldProcess = true;
+                            if ((node.getAttribute && node.getAttribute('data-id')) ||
+                                (node.querySelector && node.querySelector('[data-id]'))) {
+                                dominated = true;
                                 break;
                             }
                         }
                     }
                 }
-                if (shouldProcess) break;
+                if (dominated) break;
             }
-            if (shouldProcess) {
-                setTimeout(processVisibleRows, 400);
-            }
-        });
-
-        // Watch the main content area
-        const content = document.querySelector('#indexElement, #pageWithContainer, main, .mainDetailPage, .skinBody');
-        if (content) {
-            observer.observe(content, { childList: true, subtree: true });
-            log('MutationObserver watching:', content.tagName, content.className);
-        }
-
-        // Method 3: Listen for route changes via Jellyfin's app router
-        document.addEventListener('routechange', (e) => {
-            log('Route changed:', e.detail);
-            if (isMediaPage(e.detail?.route?.name)) {
-                setTimeout(processVisibleRows, 800);
+            if (dominated) {
+                clearTimeout(debounceTimer);
+                debounceTimer = setTimeout(processVisibleItems, 600);
             }
         });
 
-        // Also check current page on initial load
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', checkCurrentPage);
-        } else {
-            checkCurrentPage();
-        }
-    }
+        // Watch the app body — Jellyfin renders everything inside .skinBody or body
+        var watchTarget = document.querySelector('.skinBody') || document.body;
+        observer.observe(watchTarget, { childList: true, subtree: true });
+        log('MutationObserver watching: %s (class=%s)', watchTarget.tagName, watchTarget.className);
 
-    function isMediaPage(pageType) {
-        if (!pageType) return false;
-        const mediaTypes = [
-            'season', 'episodes', 'tvshows', 'tvshow',
-            'movies', 'movie', 'library', 'libraries',
-            'seasonplay', 'episodedetails'
-        ];
-        return mediaTypes.includes(pageType.toLowerCase());
-    }
+        // Method 2: Listen for viewshow event — Jellyfin fires this when a page view becomes active
+        document.addEventListener('viewshow', function (e) {
+            log('viewshow event fired: %O', e.target && e.target.className);
+            setTimeout(processVisibleItems, 800);
+        });
 
-    function checkCurrentPage() {
-        const url = window.location.href;
-        log('Current URL:', url);
+        // Method 3: hashchange for hash-based routing (#!/...)
+        window.addEventListener('hashchange', function () {
+            log('hashchange: %s', window.location.hash);
+            setTimeout(processVisibleItems, 1000);
+        });
 
-        // Jellyfin URLs for series/movies:
-        // /web/#!/season?id=<itemId>
-        // /web/#!/movies?id=<itemId>
-        // /web/#!/tvshows/details?id=<itemId>
-        if (/\/season\b|\/episodes\b|\/tvshows\b|\/movies\b|\/libraries\b/.test(url)) {
-            log('Detected media page on load');
-            setTimeout(processVisibleRows, 1000);
-        }
+        // Method 4: popstate for history-based routing
+        window.addEventListener('popstate', function () {
+            log('popstate: %s', window.location.href);
+            setTimeout(processVisibleItems, 1000);
+        });
+
+        // Check current page immediately
+        log('Checking current page on init...');
+        setTimeout(processVisibleItems, 1500);
     }
 
     // ─── Init ──────────────────────────────────────────────────────────────
 
-    /**
-     * Self-healing: verify the plugin API is reachable before initializing.
-     * If the plugin has been uninstalled, the JS endpoint will 404 and we
-     * silently do nothing — no errors, no badges, no broken UI.
-     */
     function init() {
-        var checkUrl = (CONFIG.apiBase || '') + '/Plugin/PlaybackIndicator/Settings';
-        fetch(checkUrl, { credentials: 'include' })
-            .then(function (r) {
-                if (r.ok) {
-                    return r.json();
-                }
-                return null;
-            })
-            .then(function (cfg) {
-                if (!cfg) {
-                    return;
-                }
-                // Apply debug flag from server config
-                CONFIG.debugLogging = !!cfg.EnableDebugLogging;
-                if (cfg.CacheTtlSeconds) CONFIG.cacheTtl = cfg.CacheTtlSeconds;
-                if (cfg.ShowOnTvShows !== undefined) CONFIG.showTv = cfg.ShowOnTvShows;
-                if (cfg.ShowOnMovies !== undefined) CONFIG.showMovies = cfg.ShowOnMovies;
+        log('Playback Indicator JS loading...');
 
-                log('Plugin API reachable, debug logging enabled. Initializing router hooks.');
-                initRouterHook();
-            })
-            .catch(function () {
-                // Plugin unreachable — silently do nothing
-            });
+        var apiClient = getApiClient();
+        if (!apiClient) {
+            log('ApiClient not available yet, retrying in 2s...');
+            setTimeout(init, 2000);
+            return;
+        }
+
+        // Fetch server config to apply settings
+        var settingsUrl = apiClient.getUrl('Plugin/PlaybackIndicator/Settings');
+        log('Fetching settings from: %s', settingsUrl);
+
+        apiClient.getJSON(settingsUrl).then(function (cfg) {
+            if (!cfg) {
+                log('Settings response empty, plugin may be misconfigured');
+                return;
+            }
+
+            log('Settings loaded: %O', cfg);
+
+            CONFIG.debugLogging = cfg.EnableDebugLogging !== false;
+            if (cfg.CacheTtlSeconds) CONFIG.cacheTtl = cfg.CacheTtlSeconds;
+            if (cfg.ShowOnTvShows !== undefined) CONFIG.showTv = cfg.ShowOnTvShows;
+            if (cfg.ShowOnMovies !== undefined) CONFIG.showMovies = cfg.ShowOnMovies;
+
+            log('Config applied: debug=%s, cacheTtl=%d, showTv=%s, showMovies=%s',
+                CONFIG.debugLogging, CONFIG.cacheTtl, CONFIG.showTv, CONFIG.showMovies);
+
+            initRouterHook();
+        }).catch(function (err) {
+            log('Failed to load settings (plugin may be uninstalled): %O', err);
+        });
     }
 
+    // Wait for ApiClient to be available
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', init);
+        document.addEventListener('DOMContentLoaded', function () {
+            setTimeout(init, 1000);
+        });
     } else {
-        init();
+        setTimeout(init, 1000);
     }
 
 })();

@@ -1,94 +1,82 @@
-<!DOCTYPE html>
-<html lang="en">
+<div id="playbackIndicatorConfigPage" data-role="page" class="page type-interior pluginConfigurationPage"
+    data-require="emby-input,emby-button,emby-checkbox">
+    <div data-role="content">
+        <div class="content-primary">
+            <h2>Playback Indicator</h2>
+            <p>Shows direct-play / transcode status badges on episode and movie rows.</p>
 
-<head>
-    <meta charset="utf-8">
-    <title>Playback Indicator</title>
-</head>
+            <form id="playbackIndicatorConfigForm">
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="cacheTtl">Cache TTL (seconds)</label>
+                    <input id="cacheTtl" name="CacheTtlSeconds" type="number" min="60" max="86400" is="emby-input" />
+                    <div class="fieldDescription">How long to cache playback info per item. Default: 3600 (1 hour).</div>
+                </div>
 
-<body>
-    <div id="playbackIndicatorConfigPage" data-role="page" class="page type-interior pluginConfigurationPage"
-        data-require="emby-input,emby-button,emby-checkbox">
-        <div data-role="content">
-            <div class="content-primary">
-                <h2>Playback Indicator</h2>
-                <p>Shows direct-play / transcode status badges on episode and movie rows.</p>
+                <div class="checkboxContainer checkboxContainer-withDescription">
+                    <label class="emby-checkbox-label">
+                        <input id="showTv" name="ShowOnTvShows" type="checkbox" is="emby-checkbox" />
+                        <span>Show on TV Shows</span>
+                    </label>
+                    <div class="fieldDescription checkboxFieldDescription">Inject badges on series/season episode lists.</div>
+                </div>
 
-                <form id="playbackIndicatorConfigForm">
-                    <div class="inputContainer">
-                        <label class="inputLabel inputLabelUnfocused" for="cacheTtl">Cache TTL (seconds)</label>
-                        <input id="cacheTtl" name="CacheTtlSeconds" type="number" min="60" max="86400" is="emby-input" />
-                        <div class="fieldDescription">How long to cache playback info per item. Default: 3600 (1 hour).</div>
-                    </div>
+                <div class="checkboxContainer checkboxContainer-withDescription">
+                    <label class="emby-checkbox-label">
+                        <input id="showMovies" name="ShowOnMovies" type="checkbox" is="emby-checkbox" />
+                        <span>Show on Movies</span>
+                    </label>
+                    <div class="fieldDescription checkboxFieldDescription">Inject badges on movie library rows.</div>
+                </div>
 
-                    <div class="checkboxContainer checkboxContainer-withDescription">
-                        <label class="emby-checkbox-label">
-                            <input id="showTv" name="ShowOnTvShows" type="checkbox" is="emby-checkbox" />
-                            <span>Show on TV Shows</span>
-                        </label>
-                        <div class="fieldDescription checkboxFieldDescription">Inject badges on series/season episode lists.</div>
-                    </div>
+                <div class="checkboxContainer checkboxContainer-withDescription">
+                    <label class="emby-checkbox-label">
+                        <input id="debugLogging" name="EnableDebugLogging" type="checkbox" is="emby-checkbox" />
+                        <span>Enable Debug Logging</span>
+                    </label>
+                    <div class="fieldDescription checkboxFieldDescription">Emit verbose debug messages in the server log and browser console.</div>
+                </div>
 
-                    <div class="checkboxContainer checkboxContainer-withDescription">
-                        <label class="emby-checkbox-label">
-                            <input id="showMovies" name="ShowOnMovies" type="checkbox" is="emby-checkbox" />
-                            <span>Show on Movies</span>
-                        </label>
-                        <div class="fieldDescription checkboxFieldDescription">Inject badges on movie library rows.</div>
-                    </div>
-
-                    <div class="checkboxContainer checkboxContainer-withDescription">
-                        <label class="emby-checkbox-label">
-                            <input id="debugLogging" name="EnableDebugLogging" type="checkbox" is="emby-checkbox" />
-                            <span>Enable Debug Logging</span>
-                        </label>
-                        <div class="fieldDescription checkboxFieldDescription">Emit verbose debug messages in the server log and browser console.</div>
-                    </div>
-
-                    <div>
-                        <button is="emby-button" type="submit" class="raised button-submit block emby-button">
-                            <span>Save</span>
-                        </button>
-                    </div>
-                </form>
-            </div>
+                <div>
+                    <button is="emby-button" type="submit" class="raised button-submit block emby-button">
+                        <span>Save</span>
+                    </button>
+                </div>
+            </form>
         </div>
-
-        <script type="text/javascript">
-            var PlaybackIndicatorConfig = {
-                pluginUniqueId: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890'
-            };
-
-            document.querySelector('#playbackIndicatorConfigPage')
-                .addEventListener('pageshow', function () {
-                    Dashboard.showLoadingMsg();
-                    ApiClient.getPluginConfiguration(PlaybackIndicatorConfig.pluginUniqueId).then(function (config) {
-                        document.querySelector('#cacheTtl').value = config.CacheTtlSeconds || 3600;
-                        document.querySelector('#showTv').checked = config.ShowOnTvShows !== false;
-                        document.querySelector('#showMovies').checked = config.ShowOnMovies !== false;
-                        document.querySelector('#debugLogging').checked = !!config.EnableDebugLogging;
-                        Dashboard.hideLoadingMsg();
-                    });
-                });
-
-            document.querySelector('#playbackIndicatorConfigForm')
-                .addEventListener('submit', function (e) {
-                    Dashboard.showLoadingMsg();
-                    ApiClient.getPluginConfiguration(PlaybackIndicatorConfig.pluginUniqueId).then(function (config) {
-                        config.CacheTtlSeconds = parseInt(document.querySelector('#cacheTtl').value) || 3600;
-                        config.ShowOnTvShows = document.querySelector('#showTv').checked;
-                        config.ShowOnMovies = document.querySelector('#showMovies').checked;
-                        config.EnableDebugLogging = document.querySelector('#debugLogging').checked;
-                        ApiClient.updatePluginConfiguration(PlaybackIndicatorConfig.pluginUniqueId, config).then(function (result) {
-                            Dashboard.processPluginConfigurationUpdateResult(result);
-                        });
-                    });
-
-                    e.preventDefault();
-                    return false;
-                });
-        </script>
     </div>
-</body>
 
-</html>
+    <script type="text/javascript">
+        var PlaybackIndicatorConfig = {
+            pluginUniqueId: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890'
+        };
+
+        document.querySelector('#playbackIndicatorConfigPage')
+            .addEventListener('pageshow', function () {
+                Dashboard.showLoadingMsg();
+                ApiClient.getPluginConfiguration(PlaybackIndicatorConfig.pluginUniqueId).then(function (config) {
+                    document.querySelector('#cacheTtl').value = config.CacheTtlSeconds || 3600;
+                    document.querySelector('#showTv').checked = config.ShowOnTvShows !== false;
+                    document.querySelector('#showMovies').checked = config.ShowOnMovies !== false;
+                    document.querySelector('#debugLogging').checked = !!config.EnableDebugLogging;
+                    Dashboard.hideLoadingMsg();
+                });
+            });
+
+        document.querySelector('#playbackIndicatorConfigForm')
+            .addEventListener('submit', function (e) {
+                Dashboard.showLoadingMsg();
+                ApiClient.getPluginConfiguration(PlaybackIndicatorConfig.pluginUniqueId).then(function (config) {
+                    config.CacheTtlSeconds = parseInt(document.querySelector('#cacheTtl').value) || 3600;
+                    config.ShowOnTvShows = document.querySelector('#showTv').checked;
+                    config.ShowOnMovies = document.querySelector('#showMovies').checked;
+                    config.EnableDebugLogging = document.querySelector('#debugLogging').checked;
+                    ApiClient.updatePluginConfiguration(PlaybackIndicatorConfig.pluginUniqueId, config).then(function (result) {
+                        Dashboard.processPluginConfigurationUpdateResult(result);
+                    });
+                });
+
+                e.preventDefault();
+                return false;
+            });
+    </script>
+</div>

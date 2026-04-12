@@ -9,11 +9,11 @@
         "versions": [
             {
                 "version": "0.1.0.0",
-                "changelog": "Fix JS loading via controller endpoint; inject script tag into index.html on plugin load",
+                "changelog": "Fix config page (remove HTML wrapper), fix PlaybackInfo API deserialization (MediaSources JSON key), fix JS selectors for Jellyfin 10.11, enable debug logging by default",
                 "targetAbi": "10.11.0.0",
                 "sourceUrl": "https://raw.githubusercontent.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/main/releases/jellyfin-playback-indicator-0.1.0.zip",
-                "checksum": "6398d6f41a75be9d5a721fb950ac2a2a",
-                "timestamp": "2026-04-12T17:00:00Z"
+                "checksum": "dd464e0dab206ea13e28261da91c9cc5",
+                "timestamp": "2026-04-12T22:00:00Z"
             }
         ]
     }

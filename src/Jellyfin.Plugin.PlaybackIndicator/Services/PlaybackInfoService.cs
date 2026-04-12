@@ -44,18 +44,42 @@ public class PlaybackInfoService
         IHeaderDictionary requestHeaders,
         CancellationToken cancellationToken)
     {
-        _logger.LogDebug("Checking playback status for item {ItemId}, device {DeviceId}", itemId, deviceId);
+        var debugEnabled = Plugin.Instance?.Configuration.EnableDebugLogging == true;
+
+        if (debugEnabled)
+            _logger.LogInformation("[PlaybackIndicator] Checking playback status for item {ItemId}, device {DeviceId}", itemId, deviceId);
 
         try
         {
             // Determine the local server URL
-            var serverUrl = _appHost.GetLocalApiUrl(null!);
+            string serverUrl;
+            try
+            {
+                serverUrl = _appHost.GetSmartApiUrl((System.Net.IPAddress?)null) ?? "http://localhost:8096";
+            }
+            catch
+            {
+                serverUrl = "http://localhost:8096";
+            }
+
             if (string.IsNullOrEmpty(serverUrl))
                 serverUrl = "http://localhost:8096";
 
-            // Forward relevant client headers so Jellyfin applies the right device profile
+            // Extract UserId from auth header
+            var userId = string.Empty;
+            if (requestHeaders.TryGetValue("X-Emby-Authorization", out var authHeader))
+            {
+                var authStr = authHeader.ToString();
+                var userIdMatch = System.Text.RegularExpressions.Regex.Match(authStr, @"UserId=""?([a-f0-9\-]+)""?", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                if (userIdMatch.Success)
+                    userId = userIdMatch.Groups[1].Value;
+            }
+
             var apiUrl = $"{serverUrl}/Items/{itemId}/PlaybackInfo" +
-                $"?UserId=&MaxStreamingBitrate=140000000&MaxAudioBitrate=140000000";
+                $"?UserId={userId}&MaxStreamingBitrate=140000000&MaxAudioBitrate=140000000";
+
+            if (debugEnabled)
+                _logger.LogInformation("[PlaybackIndicator] Calling PlaybackInfo API: {Url}", apiUrl);
 
             var client = _httpClientFactory.CreateClient(NamedClient.Default);
 
@@ -87,9 +111,12 @@ public class PlaybackInfoService
             var response = await client.SendAsync(apiRequest, cancellationToken).ConfigureAwait(false);
             var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
 
+            if (debugEnabled)
+                _logger.LogInformation("[PlaybackIndicator] PlaybackInfo API response ({StatusCode}): {Body}", response.StatusCode, json.Length > 500 ? json[..500] + "..." : json);
+
             if (!response.IsSuccessStatusCode)
             {
-                _logger.LogWarning("PlaybackInfo API returned {StatusCode}: {Body}", response.StatusCode, json);
+                _logger.LogWarning("[PlaybackIndicator] PlaybackInfo API returned {StatusCode}: {Body}", response.StatusCode, json);
                 return new PlaybackStatusResult
                 {
                     ItemId = itemId,
@@ -99,6 +126,9 @@ public class PlaybackInfoService
             }
 
             var playbackInfo = JsonSerializer.Deserialize<PlaybackInfoResponse>(json, JsonOptions);
+
+            if (debugEnabled)
+                _logger.LogInformation("[PlaybackIndicator] Deserialized: MediaSources count = {Count}", playbackInfo?.MediaSources?.Count ?? 0);
 
             var primarySource = playbackInfo?.MediaSources?.FirstOrDefault();
             if (primarySource is null)
@@ -119,6 +149,10 @@ public class PlaybackInfoService
                 : primarySource.SupportsDirectStream == true && !transcodingReasons.Any(r => r.Contains("Video", StringComparison.OrdinalIgnoreCase)) ? PlaybackStatus.DirectStream
                 : transcodingReasons.Any() ? PlaybackStatus.WillTranscode
                 : PlaybackStatus.Unknown;
+
+            if (debugEnabled)
+                _logger.LogInformation("[PlaybackIndicator] Item {ItemId}: SupportsDirectPlay={DirectPlay}, SupportsDirectStream={DirectStream}, TranscodeReasons=[{Reasons}], FinalStatus={Status}",
+                    itemId, primarySource.SupportsDirectPlay, primarySource.SupportsDirectStream, string.Join(", ", transcodingReasons), status);
 
             return new PlaybackStatusResult
             {
@@ -190,7 +224,7 @@ public class PlaybackInfoService
 
     internal class PlaybackInfoResponse
     {
-        [JsonPropertyName("PlaybackSources")]
+        [JsonPropertyName("MediaSources")]
         public List<MediaSourceDto>? MediaSources { get; set; }
     }
 

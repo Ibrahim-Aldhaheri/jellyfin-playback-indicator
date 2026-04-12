@@ -22,5 +22,5 @@ public class PluginConfiguration : BasePluginConfiguration
     /// <summary>
     /// Whether to emit verbose debug log messages (server-side and client-side).
     /// </summary>
-    public bool EnableDebugLogging { get; set; } = false;
+    public bool EnableDebugLogging { get; set; } = true;
 }
