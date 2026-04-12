@@ -9,11 +9,11 @@
         "versions": [
             {
                 "version": "0.1.0.0",
-                "changelog": "Initial alpha release — basic badge injection on episode/movie rows",
+                "changelog": "Fix JS loading via controller endpoint; inject script tag into index.html on plugin load",
                 "targetAbi": "10.11.0.0",
                 "sourceUrl": "https://raw.githubusercontent.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/main/releases/jellyfin-playback-indicator-0.1.0.zip",
-                "checksum": "0bf63ed86ccdb5edc92ee2a437ee19ae",
-                "timestamp": "2026-04-12T16:00:00Z"
+                "checksum": "0c4c9bec287e99c031d96962de9bda46",
+                "timestamp": "2026-04-12T17:00:00Z"
             }
         ]
     }

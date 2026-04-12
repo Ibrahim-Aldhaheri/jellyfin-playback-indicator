@@ -1,16 +1,13 @@
 {
     "guid": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
     "name": "Playback Indicator",
-    "description": "Shows direct play / transcode status badges on episode and movie rows, auto-detected from your current device.",
-    "owner": "badr-abokhalil-dev",
+    "description": "Shows direct play / transcode status badges on episode and movie rows, auto-detected from the current device.",
+    "owner": "Ibrahim-Aldhaheri",
     "category": "General",
-    "owner": "Badr",
-    "homePageUrl": "https://github.com/badr-abokhalil-dev/jellyfin-playback-indicator",
-    "iconUrl": "https://raw.githubusercontent.com/badr-abokhalil-dev/jellyfin-playback-indicator/main/icon.png",
-    "version": "1.0.0",
-    "changelog": "Initial release",
-    "targetAbi": "10.11.0",
-    "framework": "net8.0",
+    "version": "0.1.0",
+    "changelog": "Initial alpha release",
+    "targetAbi": "10.11.0.0",
+    "framework": "net9.0",
     "languages": ["en"],
-    "status": "Beta"
+    "status": "Alpha"
 }

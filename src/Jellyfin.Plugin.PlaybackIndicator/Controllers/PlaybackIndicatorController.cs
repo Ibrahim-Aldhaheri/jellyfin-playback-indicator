@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Threading.Tasks;
 using Jellyfin.Plugin.PlaybackIndicator.Configuration;
 using MediaBrowser.Common.Net;
@@ -77,5 +78,25 @@ public class PlaybackIndicatorController : ControllerBase
         {
             return StatusCode(500, new { error = ex.Message });
         }
+    }
+
+    /// <summary>
+    /// GET Plugin/PlaybackIndicator/playback-indicator.js
+    /// Serves the client-side badge-injection script as a plain JavaScript file.
+    /// </summary>
+    [HttpGet("playback-indicator.js")]
+    [AllowAnonymous]
+    public ActionResult GetPlaybackIndicatorJs()
+    {
+        var ns = typeof(PlaybackIndicatorController).Namespace;
+        var resourceName = $"{ns}.Web.playback-indicator.js";
+        using var stream = typeof(PlaybackIndicatorController).Assembly
+            .GetManifestResourceStream(resourceName);
+        if (stream is null)
+            return NotFound(new { error = "playback-indicator.js not found as embedded resource" });
+
+        using var reader = new StreamReader(stream);
+        var js = reader.ReadToEnd();
+        return Content(js, "application/javascript");
     }
 }

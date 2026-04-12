@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using Jellyfin.Plugin.PlaybackIndicator.Configuration;
+using Jellyfin.Plugin.PlaybackIndicator.Services;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Common.Plugins;
 using MediaBrowser.Model.Plugins;
@@ -16,10 +17,15 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
 {
     public const string PluginGuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
 
+    private readonly PlaybackIndicatorStartupService _startupService;
+
     public Plugin(IApplicationPaths applicationPaths, IXmlSerializer xmlSerializer)
         : base(applicationPaths, xmlSerializer)
     {
         Instance = this;
+        _startupService = new PlaybackIndicatorStartupService(applicationPaths);
+        // Inject JS into index.html on plugin load (once per server restart)
+        _startupService.InjectJsLoaderAsync().GetAwaiter().GetResult();
     }
 
     public override string Name => "Playback Indicator";
