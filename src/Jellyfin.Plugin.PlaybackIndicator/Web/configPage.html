@@ -1,154 +1,94 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
+
 <head>
     <meta charset="utf-8">
     <title>Playback Indicator</title>
-    <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            padding: 20px;
-            max-width: 600px;
-            margin: 0 auto;
-        }
-        h2 { color: #00a0dc; }
-        .setting-row {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 12px 0;
-            border-bottom: 1px solid #eee;
-        }
-        .setting-label { font-weight: 500; }
-        .setting-desc { color: #888; font-size: 13px; margin-top: 4px; }
-        input[type="number"] {
-            width: 80px;
-            padding: 6px 10px;
-            border: 1px solid #ccc;
-            border-radius: 4px;
-        }
-        .checkbox { width: 20px; height: 20px; }
-        .status { margin-top: 20px; padding: 12px; background: #e8f5e9; border-radius: 6px; color: #2e7d32; display: none; }
-        .badge-preview { margin-top: 20px; }
-        .badge {
-            display: inline-block;
-            padding: 3px 8px;
-            border-radius: 12px;
-            font-size: 12px;
-            font-weight: 600;
-            margin: 2px;
-        }
-        .badge-direct { background: #e8f5e9; color: #2e7d32; }
-        .badge-transcode { background: #fff3e0; color: #e65100; }
-        .badge-transcoding { background: #ffebee; color: #c62828; }
-        code { background: #f5f5f5; padding: 2px 6px; border-radius: 4px; }
-    </style>
 </head>
+
 <body>
-    <h2>🎬 Playback Indicator</h2>
-    <p>Shows direct-play / transcode status badges on episode and movie rows.</p>
+    <div id="playbackIndicatorConfigPage" data-role="page" class="page type-interior pluginConfigurationPage"
+        data-require="emby-input,emby-button,emby-checkbox">
+        <div data-role="content">
+            <div class="content-primary">
+                <h2>Playback Indicator</h2>
+                <p>Shows direct-play / transcode status badges on episode and movie rows.</p>
 
-    <div class="setting-row">
-        <div>
-            <div class="setting-label">Cache TTL (seconds)</div>
-            <div class="setting-desc">How long to cache playback info per item. Default: 3600 (1 hour).</div>
+                <form id="playbackIndicatorConfigForm">
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="cacheTtl">Cache TTL (seconds)</label>
+                        <input id="cacheTtl" name="CacheTtlSeconds" type="number" min="60" max="86400" is="emby-input" />
+                        <div class="fieldDescription">How long to cache playback info per item. Default: 3600 (1 hour).</div>
+                    </div>
+
+                    <div class="checkboxContainer checkboxContainer-withDescription">
+                        <label class="emby-checkbox-label">
+                            <input id="showTv" name="ShowOnTvShows" type="checkbox" is="emby-checkbox" />
+                            <span>Show on TV Shows</span>
+                        </label>
+                        <div class="fieldDescription checkboxFieldDescription">Inject badges on series/season episode lists.</div>
+                    </div>
+
+                    <div class="checkboxContainer checkboxContainer-withDescription">
+                        <label class="emby-checkbox-label">
+                            <input id="showMovies" name="ShowOnMovies" type="checkbox" is="emby-checkbox" />
+                            <span>Show on Movies</span>
+                        </label>
+                        <div class="fieldDescription checkboxFieldDescription">Inject badges on movie library rows.</div>
+                    </div>
+
+                    <div class="checkboxContainer checkboxContainer-withDescription">
+                        <label class="emby-checkbox-label">
+                            <input id="debugLogging" name="EnableDebugLogging" type="checkbox" is="emby-checkbox" />
+                            <span>Enable Debug Logging</span>
+                        </label>
+                        <div class="fieldDescription checkboxFieldDescription">Emit verbose debug messages in the server log and browser console.</div>
+                    </div>
+
+                    <div>
+                        <button is="emby-button" type="submit" class="raised button-submit block emby-button">
+                            <span>Save</span>
+                        </button>
+                    </div>
+                </form>
+            </div>
         </div>
-        <input type="number" id="cacheTtl" min="60" max="86400" value="3600">
-    </div>
 
-    <div class="setting-row">
-        <div>
-            <div class="setting-label">Show on TV Shows</div>
-            <div class="setting-desc">Inject badges on series/season episode lists.</div>
-        </div>
-        <input type="checkbox" id="showTv" class="checkbox" checked>
-    </div>
-
-    <div class="setting-row">
-        <div>
-            <div class="setting-label">Show on Movies</div>
-            <div class="setting-desc">Inject badges on movie library rows.</div>
-        </div>
-        <input type="checkbox" id="showMovies" class="checkbox" checked>
-    </div>
-
-    <div class="setting-row">
-        <div>
-            <div class="setting-label">Enable Debug Logging</div>
-            <div class="setting-desc">Emit verbose debug messages in the server log and browser console.</div>
-        </div>
-        <input type="checkbox" id="debugLogging" class="checkbox">
-    </div>
-
-    <button id="saveBtn" style="margin-top:16px; padding:10px 24px; background:#00a0dc; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:14px;">
-        Save Settings
-    </button>
-
-    <div class="status" id="statusMsg">Settings saved!</div>
-
-    <div class="badge-preview">
-        <div style="font-weight:600; margin-bottom:8px;">Badge preview:</div>
-        <span class="badge badge-direct">✅ Direct Play</span>
-        <span class="badge badge-transcode">⚠️ Will Transcode</span>
-        <span class="badge badge-transcoding">🔄 Transcoding</span>
-    </div>
-
-    <script>
-        // Expose config to our injected JS
-        window.PlaybackIndicatorConfig = {
-            cacheTtl: 3600,
-            showTv: true,
-            showMovies: true,
-            debugLogging: false,
-            apiBase: typeof ApiClient !== 'undefined' ? ApiClient.serverAddress() : ''
-        };
-
-        // Load config from plugin
-        var settingsUrl = typeof ApiClient !== 'undefined'
-            ? ApiClient.getUrl('Plugin/PlaybackIndicator/Settings')
-            : 'Plugin/PlaybackIndicator/Settings';
-        fetch(settingsUrl, { credentials: 'include' })
-            .then(r => r.ok ? r.json() : null)
-            .then(cfg => {
-                if (cfg) {
-                    document.getElementById('cacheTtl').value = cfg.CacheTtlSeconds || 3600;
-                    document.getElementById('showTv').checked = cfg.ShowOnTvShows !== false;
-                    document.getElementById('showMovies').checked = cfg.ShowOnMovies !== false;
-                    document.getElementById('debugLogging').checked = !!cfg.EnableDebugLogging;
-                    window.PlaybackIndicatorConfig.cacheTtl = cfg.CacheTtlSeconds || 3600;
-                    window.PlaybackIndicatorConfig.showTv = cfg.ShowOnTvShows !== false;
-                    window.PlaybackIndicatorConfig.showMovies = cfg.ShowOnMovies !== false;
-                    window.PlaybackIndicatorConfig.debugLogging = !!cfg.EnableDebugLogging;
-                }
-            })
-            .catch(() => {});
-
-        document.getElementById('saveBtn').addEventListener('click', () => {
-            const cfg = {
-                CacheTtlSeconds: parseInt(document.getElementById('cacheTtl').value) || 3600,
-                ShowOnTvShows: document.getElementById('showTv').checked,
-                ShowOnMovies: document.getElementById('showMovies').checked,
-                EnableDebugLogging: document.getElementById('debugLogging').checked
+        <script type="text/javascript">
+            var PlaybackIndicatorConfig = {
+                pluginUniqueId: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890'
             };
-            window.PlaybackIndicatorConfig.cacheTtl = cfg.CacheTtlSeconds;
-            window.PlaybackIndicatorConfig.showTv = cfg.ShowOnTvShows;
-            window.PlaybackIndicatorConfig.showMovies = cfg.ShowOnMovies;
-            window.PlaybackIndicatorConfig.debugLogging = cfg.EnableDebugLogging;
 
-            var saveUrl = typeof ApiClient !== 'undefined'
-                ? ApiClient.getUrl('Plugin/PlaybackIndicator/Settings')
-                : 'Plugin/PlaybackIndicator/Settings';
-            fetch(saveUrl, {
-                method: 'POST',
-                credentials: 'include',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(cfg)
-            }).then(r => {
-                const msg = document.getElementById('statusMsg');
-                msg.style.display = 'block';
-                msg.textContent = r.ok ? 'Settings saved!' : 'Error saving settings.';
-                setTimeout(() => msg.style.display = 'none', 3000);
-            });
-        });
-    </script>
+            document.querySelector('#playbackIndicatorConfigPage')
+                .addEventListener('pageshow', function () {
+                    Dashboard.showLoadingMsg();
+                    ApiClient.getPluginConfiguration(PlaybackIndicatorConfig.pluginUniqueId).then(function (config) {
+                        document.querySelector('#cacheTtl').value = config.CacheTtlSeconds || 3600;
+                        document.querySelector('#showTv').checked = config.ShowOnTvShows !== false;
+                        document.querySelector('#showMovies').checked = config.ShowOnMovies !== false;
+                        document.querySelector('#debugLogging').checked = !!config.EnableDebugLogging;
+                        Dashboard.hideLoadingMsg();
+                    });
+                });
+
+            document.querySelector('#playbackIndicatorConfigForm')
+                .addEventListener('submit', function (e) {
+                    Dashboard.showLoadingMsg();
+                    ApiClient.getPluginConfiguration(PlaybackIndicatorConfig.pluginUniqueId).then(function (config) {
+                        config.CacheTtlSeconds = parseInt(document.querySelector('#cacheTtl').value) || 3600;
+                        config.ShowOnTvShows = document.querySelector('#showTv').checked;
+                        config.ShowOnMovies = document.querySelector('#showMovies').checked;
+                        config.EnableDebugLogging = document.querySelector('#debugLogging').checked;
+                        ApiClient.updatePluginConfiguration(PlaybackIndicatorConfig.pluginUniqueId, config).then(function (result) {
+                            Dashboard.processPluginConfigurationUpdateResult(result);
+                        });
+                    });
+
+                    e.preventDefault();
+                    return false;
+                });
+        </script>
+    </div>
 </body>
+
 </html>
