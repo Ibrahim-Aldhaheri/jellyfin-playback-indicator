@@ -77,10 +77,42 @@
     }
 
     /**
-     * Calls Jellyfin's built-in PlaybackInfo API to determine the exact
-     * play method (DirectPlay / DirectStream / Transcode) for this client.
-     * This is the same API Jellyfin's own web player uses — it automatically
-     * uses the correct device profile for whatever client is making the request.
+     * Minimal DeviceProfile for web browsers so Jellyfin can correctly
+     * evaluate DirectPlay vs DirectStream vs Transcode.
+     * Without this, the GET endpoint returns SupportsDirectPlay=true for everything.
+     */
+    function getWebDeviceProfile() {
+        var videoCodecs = 'h264,h265,hevc,vp8,vp9,av1';
+        var audioCodecs = 'aac,mp3,opus,flac,vorbis,ac3,eac3';
+        return {
+            DirectPlayProfiles: [
+                { Container: 'mp4,m4v', Type: 'Video', VideoCodec: videoCodecs, AudioCodec: audioCodecs },
+                { Container: 'webm', Type: 'Video', VideoCodec: 'vp8,vp9,av1', AudioCodec: 'opus,vorbis' },
+                { Container: 'mp3', Type: 'Audio' },
+                { Container: 'aac,m4a,m4b', Type: 'Audio' },
+                { Container: 'flac', Type: 'Audio' },
+                { Container: 'webma,webm', Type: 'Audio' },
+                { Container: 'wav', Type: 'Audio' },
+                { Container: 'ogg,oga', Type: 'Audio' }
+            ],
+            TranscodingProfiles: [
+                { Container: 'ts', Type: 'Video', VideoCodec: 'h264', AudioCodec: 'aac,mp3', Context: 'Streaming', Protocol: 'hls', BreakOnNonKeyFrames: true },
+                { Container: 'mp4', Type: 'Video', VideoCodec: 'h264', AudioCodec: 'aac,mp3', Context: 'Static', Protocol: 'http' },
+                { Container: 'mp3', Type: 'Audio', AudioCodec: 'mp3', Context: 'Streaming', Protocol: 'http' }
+            ],
+            ContainerProfiles: [],
+            CodecProfiles: [],
+            SubtitleProfiles: [
+                { Format: 'vtt', Method: 'External' },
+                { Format: 'ass', Method: 'External' },
+                { Format: 'ssa', Method: 'External' }
+            ]
+        };
+    }
+
+    /**
+     * Calls Jellyfin's PlaybackInfo API via POST with a DeviceProfile
+     * so Jellyfin can correctly evaluate DirectPlay/DirectStream/Transcode.
      */
     function fetchPlaybackStatus(itemId) {
         var cached = getCached(itemId);
@@ -95,11 +127,23 @@
             return Promise.resolve({ Status: 'Unknown', Reason: 'No ApiClient' });
         }
 
-        var userId = apiClient.getCurrentUserId();
-        var url = apiClient.getUrl('Items/' + itemId + '/PlaybackInfo', { userId: userId });
-        log('Fetching PlaybackInfo: %s', url);
+        var url = apiClient.getUrl('Items/' + itemId + '/PlaybackInfo');
+        var postData = {
+            UserId: apiClient.getCurrentUserId(),
+            DeviceProfile: getWebDeviceProfile(),
+            MaxStreamingBitrate: 120000000,
+            StartTimeTicks: 0,
+            AutoOpenLiveStream: false
+        };
+        log('POSTing PlaybackInfo for %s', itemId);
 
-        return apiClient.getJSON(url).then(function (playbackInfo) {
+        return apiClient.ajax({
+            url: url,
+            type: 'POST',
+            data: JSON.stringify(postData),
+            contentType: 'application/json',
+            dataType: 'json'
+        }).then(function (playbackInfo) {
             log('PlaybackInfo for %s: %O', itemId, playbackInfo);
 
             var result = parsePlaybackInfo(playbackInfo);
