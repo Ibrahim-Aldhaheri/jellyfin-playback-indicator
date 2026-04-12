@@ -67,9 +67,17 @@ public class PlaybackInfoService
     /// <summary>
     /// Gets playback status for an item by inspecting its media sources directly.
     /// </summary>
+    /// <param name="itemId">The item GUID.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <param name="isDesktopBrowser">
+    /// When true the client is a desktop web browser that cannot direct-play MKV
+    /// (needs remux to MP4). When false the client is a native/mobile app that
+    /// can direct-play MKV natively.
+    /// </param>
     public Task<PlaybackStatusResult> GetPlaybackStatusAsync(
         string itemId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool isDesktopBrowser = true)
     {
         var debugEnabled = Plugin.Instance?.Configuration.EnableDebugLogging == true;
 
@@ -142,8 +150,10 @@ public class PlaybackInfoService
                 && ExtendedVideoCodecs.Contains(videoCodec);
 
             // Check if container needs remuxing for browser playback.
-            // MKV with supported codecs = DirectStream (remux to MP4, no re-encoding).
-            bool containerNeedRemux = !string.IsNullOrEmpty(container)
+            // MKV with supported codecs = DirectStream on desktop browsers (remux to MP4).
+            // Native/mobile apps (Android, iOS, TV) can direct-play MKV natively.
+            bool containerNeedRemux = isDesktopBrowser
+                && !string.IsNullOrEmpty(container)
                 && CommonDirectPlayContainers.Contains(container)
                 && !BrowserNativeContainers.Contains(container);
 

@@ -188,45 +188,93 @@
     // ─── Detail page badge ───────────────────────────────────────────────
 
     function tryInjectDetailPageBadge() {
-        if (!CONFIG.showMovies) return;
-
-        // Detect movie detail page by URL pattern and page structure
+        // Detect detail page by URL pattern — Jellyfin uses #!/details?id=GUID
         var hash = window.location.hash || '';
         var href = window.location.href || '';
-        var isDetailPage = hash.indexOf('details') !== -1 || hash.indexOf('item') !== -1
-            || href.indexOf('/details') !== -1 || href.indexOf('id=') !== -1;
+        var fullUrl = hash + ' ' + href;
+        var isDetailPage = /[#/](details|item)\b/.test(fullUrl) || /[?&]id=/.test(fullUrl);
 
-        if (!isDetailPage) return;
+        if (!isDetailPage) {
+            log('Not a detail page: %s', hash || href);
+            return;
+        }
 
-        // Find the detail page container — Jellyfin 10.11 uses various selectors
-        var detailContainer = document.querySelector('.detailPageContent, .detailPagePrimaryContainer, .itemDetailPage');
-        if (!detailContainer) return;
-
-        // Don't re-inject if badge already exists on detail page
-        if (detailContainer.querySelector('.' + BADGE_CLASS)) return;
-
-        // Try to get the item ID from the URL
+        // Extract item ID from URL — GUIDs contain hex chars AND dashes
         var itemId = null;
-        var idMatch = (hash + href).match(/[?&]id=([a-f0-9]+)/i);
+        var idMatch = fullUrl.match(/[?&]id=([a-f0-9-]+)/i);
         if (idMatch) {
             itemId = idMatch[1];
         }
 
-        // Also try data-id on the detail container or nearby elements
         if (!itemId) {
-            var detailEl = detailContainer.querySelector('[data-id]') || detailContainer.closest('[data-id]');
-            if (detailEl) itemId = detailEl.getAttribute('data-id');
+            log('Detail page detected but no item ID found in URL');
+            return;
         }
 
-        if (!itemId) {
-            log('Detail page detected but no item ID found');
-            return;
+        // Determine if this is a movie or episode detail page
+        // Check URL for type hint, or inspect the page content
+        var isMovie = /type=Movie/i.test(fullUrl);
+        var isEpisode = /type=Episode/i.test(fullUrl);
+
+        // If no type in URL, allow badge for both movies and episodes based on config
+        if (!isMovie && !isEpisode) {
+            // Could be either — allow if at least one type is enabled
+            if (!CONFIG.showMovies && !CONFIG.showTv) return;
+        } else {
+            if (isMovie && !CONFIG.showMovies) return;
+            if (isEpisode && !CONFIG.showTv) return;
         }
 
         log('Detail page detected for item %s', itemId);
 
-        // Find a good injection point — near the title or media info
-        var injectTarget = detailContainer.querySelector('.infoWrapper, .detailPageWrapperContainer, .mainDetailInfo, .detailSectionHeader, .itemName, h1, h2, h3');
+        // Find the detail page container — try multiple selectors for Jellyfin 10.11
+        var detailSelectors = [
+            '.detailPagePrimaryContainer',
+            '.detailPageContent',
+            '.itemDetailPage',
+            'div[is="emby-itemscontainer"]',
+            '.page:not(.hide)',
+            '.mainDetailInfo'
+        ];
+
+        var detailContainer = null;
+        for (var i = 0; i < detailSelectors.length; i++) {
+            detailContainer = document.querySelector(detailSelectors[i]);
+            if (detailContainer) {
+                log('Detail container found with selector: %s', detailSelectors[i]);
+                break;
+            }
+        }
+
+        if (!detailContainer) {
+            // Last resort: use the visible page
+            detailContainer = document.querySelector('.page:not(.hide)') || document.body;
+            log('Using fallback detail container: %s', detailContainer.className);
+        }
+
+        // Don't re-inject if badge already exists
+        if (detailContainer.querySelector('.' + BADGE_CLASS)) return;
+
+        // Find injection point — prefer media info area, then title area
+        var injectSelectors = [
+            '.mediaInfoPrimary',
+            '.mediaInfoContent',
+            '.infoWrapper',
+            '.mainDetailInfo',
+            '.detailPageWrapperContainer',
+            '.itemName',
+            'h1', 'h2', 'h3'
+        ];
+
+        var injectTarget = null;
+        for (var j = 0; j < injectSelectors.length; j++) {
+            injectTarget = detailContainer.querySelector(injectSelectors[j]);
+            if (injectTarget) {
+                log('Inject target found with selector: %s', injectSelectors[j]);
+                break;
+            }
+        }
+
         if (!injectTarget) {
             injectTarget = detailContainer;
         }
@@ -312,8 +360,23 @@
                     for (var j = 0; j < m.addedNodes.length; j++) {
                         var node = m.addedNodes[j];
                         if (node.nodeType === Node.ELEMENT_NODE) {
+                            // Trigger on data-id elements (list/card items)
                             if ((node.getAttribute && node.getAttribute('data-id')) ||
                                 (node.querySelector && node.querySelector('[data-id]'))) {
+                                dominated = true;
+                                break;
+                            }
+                            // Also trigger on detail page content being added
+                            if (node.classList && (
+                                node.classList.contains('detailPagePrimaryContainer') ||
+                                node.classList.contains('mainDetailInfo') ||
+                                node.classList.contains('itemDetailPage') ||
+                                node.classList.contains('detailPageContent'))) {
+                                dominated = true;
+                                break;
+                            }
+                            // Check if added node contains detail page elements
+                            if (node.querySelector && node.querySelector('.detailPagePrimaryContainer, .mainDetailInfo')) {
                                 dominated = true;
                                 break;
                             }

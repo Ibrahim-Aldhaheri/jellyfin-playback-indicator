@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Jellyfin.Plugin.PlaybackIndicator.Configuration;
 using Microsoft.AspNetCore.Authorization;
@@ -50,6 +51,36 @@ public class PlaybackIndicatorController : ControllerBase
         return Ok();
     }
 
+    // Desktop browsers that need MKV remuxed to MP4.
+    // Mobile/native apps can direct-play MKV containers natively.
+    private static readonly Regex DesktopBrowserPattern = new(
+        @"(Windows|Macintosh|X11|Linux).*?(Chrome|Firefox|Safari|Edg|OPR|Opera|Brave)",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    // Patterns that indicate a native/mobile client (can direct-play MKV)
+    private static readonly Regex NativeClientPattern = new(
+        @"(Android|iPhone|iPad|iPod|CrKey|SmartTV|Tizen|webOS|Roku|AppleTV|AFT|BRAVIA|Dalvik|okhttp|Jellyfin\s+Mobile)",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// Determines whether the requesting client is a desktop web browser
+    /// (which cannot direct-play MKV and needs remuxing).
+    /// </summary>
+    private bool IsDesktopBrowser()
+    {
+        var ua = HttpContext.Request.Headers.UserAgent.ToString();
+        if (string.IsNullOrEmpty(ua)) return true; // default to safe assumption
+
+        // Native/mobile clients can direct-play MKV
+        if (NativeClientPattern.IsMatch(ua)) return false;
+
+        // Desktop browsers need MKV remuxed
+        if (DesktopBrowserPattern.IsMatch(ua)) return true;
+
+        // Unknown UA — assume desktop browser (safe default)
+        return true;
+    }
+
     /// <summary>
     /// GET Plugin/PlaybackIndicator/PlaybackStatus/{itemId}
     /// Calculates and returns the direct-play / transcode status for an item.
@@ -59,16 +90,21 @@ public class PlaybackIndicatorController : ControllerBase
         [FromRoute] string itemId)
     {
         var debugEnabled = Plugin.Instance?.Configuration.EnableDebugLogging == true;
+        var isDesktopBrowser = IsDesktopBrowser();
+
         if (debugEnabled)
         {
-            _logger.LogDebug("PlaybackStatus request: ItemId={ItemId}", itemId);
+            var ua = HttpContext.Request.Headers.UserAgent.ToString();
+            _logger.LogDebug("PlaybackStatus request: ItemId={ItemId}, IsDesktopBrowser={IsDesktop}, UA={UA}",
+                itemId, isDesktopBrowser, ua);
         }
 
         try
         {
             var result = await _playbackInfoService.GetPlaybackStatusAsync(
                 itemId,
-                HttpContext.RequestAborted).ConfigureAwait(false);
+                HttpContext.RequestAborted,
+                isDesktopBrowser).ConfigureAwait(false);
 
             if (debugEnabled)
             {
