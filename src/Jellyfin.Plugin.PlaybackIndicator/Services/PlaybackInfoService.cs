@@ -38,6 +38,15 @@ public class PlaybackInfoService
     };
 
     /// <summary>
+    /// Containers that browsers can play natively without remuxing.
+    /// MKV is NOT here — browsers need it remuxed to MP4 (= DirectStream).
+    /// </summary>
+    private static readonly HashSet<string> BrowserNativeContainers = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "mp4", "m4v", "webm", "mov"
+    };
+
+    /// <summary>
     /// Codecs that many modern clients support but may transcode on some.
     /// </summary>
     private static readonly HashSet<string> ExtendedVideoCodecs = new(StringComparer.OrdinalIgnoreCase)
@@ -132,16 +141,36 @@ public class PlaybackInfoService
                 && !CommonDirectPlayVideoCodecs.Contains(videoCodec)
                 && ExtendedVideoCodecs.Contains(videoCodec);
 
+            // Check if container needs remuxing for browser playback.
+            // MKV with supported codecs = DirectStream (remux to MP4, no re-encoding).
+            bool containerNeedRemux = !string.IsNullOrEmpty(container)
+                && CommonDirectPlayContainers.Contains(container)
+                && !BrowserNativeContainers.Contains(container);
+
             PlaybackStatus status;
-            if (reasons.Count == 0 && !videoIsExtendedOnly)
+            if (reasons.Count == 0 && !videoIsExtendedOnly && !containerNeedRemux)
             {
                 status = PlaybackStatus.DirectPlay;
             }
+            else if (reasons.Count == 0 && containerNeedRemux)
+            {
+                // Codecs are fine but container needs remuxing (e.g. MKV → MP4)
+                status = PlaybackStatus.DirectStream;
+                reasons.Add($"ContainerRemux ({container} → mp4) — no re-encoding needed");
+            }
             else if (reasons.Count == 0 && videoIsExtendedOnly)
             {
-                // Extended codec (hevc, vp9, av1) — many clients handle it, but not all
-                status = PlaybackStatus.DirectPlay;
-                reasons.Add($"ExtendedCodec ({videoCodec}) — most clients direct-play this");
+                // Extended codec in browser-native container
+                if (containerNeedRemux)
+                {
+                    status = PlaybackStatus.DirectStream;
+                    reasons.Add($"ContainerRemux ({container} → mp4) + ExtendedCodec ({videoCodec})");
+                }
+                else
+                {
+                    status = PlaybackStatus.DirectPlay;
+                    reasons.Add($"ExtendedCodec ({videoCodec}) — most clients direct-play this");
+                }
             }
             else
             {
@@ -159,7 +188,7 @@ public class PlaybackInfoService
                 Status = status,
                 Reason = string.Join(", ", reasons),
                 DirectPlayEligible = status == PlaybackStatus.DirectPlay,
-                DirectStreamEligible = source.SupportsDirectStream,
+                DirectStreamEligible = status == PlaybackStatus.DirectStream || source.SupportsDirectStream,
                 Container = container,
                 AudioCodec = audioCodec,
                 VideoCodec = videoCodec,

@@ -88,18 +88,44 @@
     // ─── Badge rendering ────────────────────────────────────────────────────
 
     var badgeConfig = {
-        'DirectPlay':     { icon: '\u2705', label: 'Direct Play',     bg: '#e8f5e9', fg: '#2e7d32' },
-        'DirectStream':   { icon: '\uD83D\uDCA7', label: 'Direct Stream',   bg: '#e3f2fd', fg: '#1565c0' },
-        'WillTranscode':  { icon: '\u26A0\uFE0F', label: 'Will Transcode',  bg: '#fff3e0', fg: '#e65100' },
-        'Transcoding':    { icon: '\uD83D\uDD04', label: 'Transcoding',     bg: '#ffebee', fg: '#c62828' },
-        'Unknown':        { icon: '\u2753', label: 'Unknown',         bg: '#f5f5f5', fg: '#757575' }
+        'DirectPlay':     { icon: '\u2705', label: 'Direct Play',     cls: 'jpi-direct-play' },
+        'DirectStream':   { icon: '\uD83D\uDCA7', label: 'Direct Stream',   cls: 'jpi-direct-stream' },
+        'WillTranscode':  { icon: '\u26A0\uFE0F', label: 'Will Transcode',  cls: 'jpi-will-transcode' },
+        'Transcoding':    { icon: '\uD83D\uDD04', label: 'Transcoding',     cls: 'jpi-transcoding' },
+        'Unknown':        { icon: '\u2753', label: 'Unknown',         cls: 'jpi-unknown' }
     };
 
-    function badgeHtml(status, reason) {
+    // Inject theme-aware CSS once
+    function injectStyles() {
+        if (document.getElementById('jpi-styles')) return;
+        var style = document.createElement('style');
+        style.id = 'jpi-styles';
+        style.textContent = [
+            '.jpi-badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;white-space:nowrap;line-height:1.4;vertical-align:middle}',
+            '.jpi-direct-play{background:rgba(46,125,50,0.15);color:#4caf50}',
+            '.jpi-direct-stream{background:rgba(21,101,192,0.15);color:#42a5f5}',
+            '.jpi-will-transcode{background:rgba(230,81,0,0.15);color:#ff9800}',
+            '.jpi-transcoding{background:rgba(198,40,40,0.15);color:#ef5350}',
+            '.jpi-unknown{background:rgba(117,117,117,0.15);color:#9e9e9e}',
+            // Light theme overrides — Jellyfin adds .skin-light or similar
+            '@media(prefers-color-scheme:light){',
+            '  .jpi-direct-play{background:rgba(46,125,50,0.12);color:#2e7d32}',
+            '  .jpi-direct-stream{background:rgba(21,101,192,0.12);color:#1565c0}',
+            '  .jpi-will-transcode{background:rgba(230,81,0,0.12);color:#e65100}',
+            '  .jpi-transcoding{background:rgba(198,40,40,0.12);color:#c62828}',
+            '  .jpi-unknown{background:rgba(117,117,117,0.1);color:#757575}',
+            '}',
+            '.jpi-detail-badge{margin:8px 0;display:block}'
+        ].join('\n');
+        document.head.appendChild(style);
+    }
+
+    function badgeHtml(status, reason, extraClass) {
         var key = status || 'Unknown';
         var cfg = badgeConfig[key] || badgeConfig['Unknown'];
+        var cls = BADGE_CLASS + ' ' + cfg.cls + (extraClass ? ' ' + extraClass : '');
 
-        return '<span class="' + BADGE_CLASS + '" style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;white-space:nowrap;background:' + cfg.bg + ';color:' + cfg.fg + '" title="' + (reason || cfg.label) + '">' + cfg.icon + ' ' + cfg.label + '</span>';
+        return '<span class="' + cls + '" title="' + (reason || cfg.label).replace(/"/g, '&quot;') + '">' + cfg.icon + ' ' + cfg.label + '</span>';
     }
 
     function injectBadge(el, status, reason) {
@@ -159,12 +185,70 @@
         return items;
     }
 
+    // ─── Detail page badge ───────────────────────────────────────────────
+
+    function tryInjectDetailPageBadge() {
+        if (!CONFIG.showMovies) return;
+
+        // Detect movie detail page by URL pattern and page structure
+        var hash = window.location.hash || '';
+        var href = window.location.href || '';
+        var isDetailPage = hash.indexOf('details') !== -1 || hash.indexOf('item') !== -1
+            || href.indexOf('/details') !== -1 || href.indexOf('id=') !== -1;
+
+        if (!isDetailPage) return;
+
+        // Find the detail page container — Jellyfin 10.11 uses various selectors
+        var detailContainer = document.querySelector('.detailPageContent, .detailPagePrimaryContainer, .itemDetailPage');
+        if (!detailContainer) return;
+
+        // Don't re-inject if badge already exists on detail page
+        if (detailContainer.querySelector('.' + BADGE_CLASS)) return;
+
+        // Try to get the item ID from the URL
+        var itemId = null;
+        var idMatch = (hash + href).match(/[?&]id=([a-f0-9]+)/i);
+        if (idMatch) {
+            itemId = idMatch[1];
+        }
+
+        // Also try data-id on the detail container or nearby elements
+        if (!itemId) {
+            var detailEl = detailContainer.querySelector('[data-id]') || detailContainer.closest('[data-id]');
+            if (detailEl) itemId = detailEl.getAttribute('data-id');
+        }
+
+        if (!itemId) {
+            log('Detail page detected but no item ID found');
+            return;
+        }
+
+        log('Detail page detected for item %s', itemId);
+
+        // Find a good injection point — near the title or media info
+        var injectTarget = detailContainer.querySelector('.infoWrapper, .detailPageWrapperContainer, .mainDetailInfo, .detailSectionHeader, .itemName, h1, h2, h3');
+        if (!injectTarget) {
+            injectTarget = detailContainer;
+        }
+
+        fetchPlaybackStatus(itemId).then(function (data) {
+            // Check again in case it was injected while waiting
+            if (detailContainer.querySelector('.' + BADGE_CLASS)) return;
+            var html = badgeHtml(data.Status || data.status, data.Reason || data.reason, 'jpi-detail-badge');
+            injectTarget.insertAdjacentHTML('afterend', html);
+            log('Detail page badge injected for %s: %s', itemId, data.Status || data.status);
+        });
+    }
+
     // ─── Processing ────────────────────────────────────────────────────────
 
     var processing = false;
     var pendingProcess = false;
 
     function processVisibleItems() {
+        // Always try the detail page badge (independent of card/list processing)
+        tryInjectDetailPageBadge();
+
         if (processing) {
             pendingProcess = true;
             return;
@@ -304,6 +388,7 @@
             log('Config applied: debug=%s, cacheTtl=%d, showTv=%s, showMovies=%s',
                 CONFIG.debugLogging, CONFIG.cacheTtl, CONFIG.showTv, CONFIG.showMovies);
 
+            injectStyles();
             initRouterHook();
         }).catch(function (err) {
             log('Failed to load settings (plugin may be uninstalled): %O', err);

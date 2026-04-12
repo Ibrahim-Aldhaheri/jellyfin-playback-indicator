@@ -9,10 +9,10 @@
         "versions": [
             {
                 "version": "0.1.0.0",
-                "changelog": "Replace HTTP self-calls with internal Jellyfin APIs (ILibraryManager, IMediaSourceManager) to fix Unauthorized errors",
+                "changelog": "Fix DirectStream detection (MKV remux), add movie detail page badge, add dark theme support",
                 "targetAbi": "10.11.0.0",
                 "sourceUrl": "https://raw.githubusercontent.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/main/releases/jellyfin-plugin-playbackindicator-0.1.0.0.zip",
-                "checksum": "eb0ccda9722987a63a4882691a124515",
+                "checksum": "f8aca70187018f80296a1b41d25c39d8",
                 "timestamp": "2026-04-12T23:00:00Z"
             }
         ]
