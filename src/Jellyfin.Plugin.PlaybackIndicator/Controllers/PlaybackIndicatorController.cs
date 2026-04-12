@@ -2,9 +2,6 @@ using System;
 using System.IO;
 using System.Threading.Tasks;
 using Jellyfin.Plugin.PlaybackIndicator.Configuration;
-using MediaBrowser.Common.Net;
-using MediaBrowser.Controller;
-using MediaBrowser.Controller.Session;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
@@ -19,16 +16,13 @@ namespace Jellyfin.Plugin.PlaybackIndicator.Controllers;
 [Authorize]
 public class PlaybackIndicatorController : ControllerBase
 {
-    private readonly IServerApplicationPaths _appPaths;
     private readonly PlaybackInfoService _playbackInfoService;
     private readonly ILogger<PlaybackIndicatorController> _logger;
 
     public PlaybackIndicatorController(
-        IServerApplicationPaths appPaths,
         PlaybackInfoService playbackInfoService,
         ILogger<PlaybackIndicatorController> logger)
     {
-        _appPaths = appPaths;
         _playbackInfoService = playbackInfoService;
         _logger = logger;
     }
@@ -62,25 +56,18 @@ public class PlaybackIndicatorController : ControllerBase
     /// </summary>
     [HttpGet("PlaybackStatus/{itemId}")]
     public async Task<ActionResult<PlaybackStatusResult>> GetPlaybackStatus(
-        [FromRoute] string itemId,
-        [FromQuery] string? deviceId = null)
+        [FromRoute] string itemId)
     {
-        var devId = deviceId
-            ?? Request.Headers["X-Emby-Client-Device-Id"].ToString()
-            ?? string.Empty;
-
         var debugEnabled = Plugin.Instance?.Configuration.EnableDebugLogging == true;
         if (debugEnabled)
         {
-            _logger.LogDebug("PlaybackStatus request: ItemId={ItemId}, DeviceId={DeviceId}", itemId, devId);
+            _logger.LogDebug("PlaybackStatus request: ItemId={ItemId}", itemId);
         }
 
         try
         {
             var result = await _playbackInfoService.GetPlaybackStatusAsync(
                 itemId,
-                devId,
-                Request.Headers,
                 HttpContext.RequestAborted).ConfigureAwait(false);
 
             if (debugEnabled)

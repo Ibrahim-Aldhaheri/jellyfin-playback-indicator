@@ -9,11 +9,11 @@
         "versions": [
             {
                 "version": "0.1.0.0",
-                "changelog": "Fix config page (remove HTML wrapper), fix PlaybackInfo API deserialization (MediaSources JSON key), fix JS selectors for Jellyfin 10.11, enable debug logging by default",
+                "changelog": "Replace HTTP self-calls with internal Jellyfin APIs (ILibraryManager, IMediaSourceManager) to fix Unauthorized errors",
                 "targetAbi": "10.11.0.0",
-                "sourceUrl": "https://raw.githubusercontent.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/main/releases/jellyfin-playback-indicator-0.1.0.zip",
-                "checksum": "dd464e0dab206ea13e28261da91c9cc5",
-                "timestamp": "2026-04-12T22:00:00Z"
+                "sourceUrl": "https://raw.githubusercontent.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/main/releases/jellyfin-plugin-playbackindicator-0.1.0.0.zip",
+                "checksum": "eb0ccda9722987a63a4882691a124515",
+                "timestamp": "2026-04-12T23:00:00Z"
             }
         ]
     }

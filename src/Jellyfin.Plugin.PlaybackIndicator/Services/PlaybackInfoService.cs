@@ -1,268 +1,181 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Net.Http;
-using System.Text.Json;
-using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
-using MediaBrowser.Common.Net;
-using MediaBrowser.Controller;
-using MediaBrowser.Controller.Session;
-using Microsoft.AspNetCore.Http;
+using MediaBrowser.Controller.Library;
+using MediaBrowser.Model.Entities;
 using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Plugin.PlaybackIndicator;
 
 /// <summary>
-/// Calculates direct-play / transcode status for a media item by calling
-/// Jellyfin's own PlaybackInfo API from within the server.
+/// Determines direct-play / transcode status for a media item using
+/// Jellyfin's internal library and media-source APIs (no HTTP calls).
 /// </summary>
 public class PlaybackInfoService
 {
-    private readonly IServerApplicationHost _appHost;
-    private readonly IHttpClientFactory _httpClientFactory;
+    private readonly ILibraryManager _libraryManager;
+    private readonly IMediaSourceManager _mediaSourceManager;
     private readonly ILogger<PlaybackInfoService> _logger;
 
+    /// <summary>
+    /// Codecs that virtually all Jellyfin web clients can direct-play.
+    /// </summary>
+    private static readonly HashSet<string> CommonDirectPlayVideoCodecs = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "h264", "avc", "avc1"
+    };
+
+    private static readonly HashSet<string> CommonDirectPlayAudioCodecs = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "aac", "mp3", "ac3", "eac3", "flac", "opus", "vorbis"
+    };
+
+    private static readonly HashSet<string> CommonDirectPlayContainers = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "mp4", "mkv", "webm", "mov", "m4v"
+    };
+
+    /// <summary>
+    /// Codecs that many modern clients support but may transcode on some.
+    /// </summary>
+    private static readonly HashSet<string> ExtendedVideoCodecs = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "hevc", "h265", "hev1", "hvc1", "vp9", "av1"
+    };
+
     public PlaybackInfoService(
-        IServerApplicationHost appHost,
-        IHttpClientFactory httpClientFactory,
+        ILibraryManager libraryManager,
+        IMediaSourceManager mediaSourceManager,
         ILogger<PlaybackInfoService> logger)
     {
-        _appHost = appHost;
-        _httpClientFactory = httpClientFactory;
+        _libraryManager = libraryManager;
+        _mediaSourceManager = mediaSourceManager;
         _logger = logger;
     }
 
     /// <summary>
-    /// Calls Jellyfin's internal PlaybackInfo API to determine whether an item
-    /// will direct-play or require transcoding on the given device.
+    /// Gets playback status for an item by inspecting its media sources directly.
     /// </summary>
-    public async Task<PlaybackStatusResult> GetPlaybackStatusAsync(
+    public Task<PlaybackStatusResult> GetPlaybackStatusAsync(
         string itemId,
-        string deviceId,
-        IHeaderDictionary requestHeaders,
         CancellationToken cancellationToken)
     {
         var debugEnabled = Plugin.Instance?.Configuration.EnableDebugLogging == true;
 
         if (debugEnabled)
-            _logger.LogInformation("[PlaybackIndicator] Checking playback status for item {ItemId}, device {DeviceId}", itemId, deviceId);
+            _logger.LogInformation("[PlaybackIndicator] Checking playback status for item {ItemId}", itemId);
 
         try
         {
-            // Determine the local server URL
-            string serverUrl;
-            try
+            if (!Guid.TryParse(itemId, out var itemGuid))
             {
-                serverUrl = _appHost.GetSmartApiUrl((System.Net.IPAddress?)null) ?? "http://localhost:8096";
-            }
-            catch
-            {
-                serverUrl = "http://localhost:8096";
-            }
-
-            if (string.IsNullOrEmpty(serverUrl))
-                serverUrl = "http://localhost:8096";
-
-            // Extract UserId from auth header
-            var userId = string.Empty;
-            if (requestHeaders.TryGetValue("X-Emby-Authorization", out var authHeader))
-            {
-                var authStr = authHeader.ToString();
-                var userIdMatch = System.Text.RegularExpressions.Regex.Match(authStr, @"UserId=""?([a-f0-9\-]+)""?", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-                if (userIdMatch.Success)
-                    userId = userIdMatch.Groups[1].Value;
-            }
-
-            var apiUrl = $"{serverUrl}/Items/{itemId}/PlaybackInfo" +
-                $"?UserId={userId}&MaxStreamingBitrate=140000000&MaxAudioBitrate=140000000";
-
-            if (debugEnabled)
-                _logger.LogInformation("[PlaybackIndicator] Calling PlaybackInfo API: {Url}", apiUrl);
-
-            var client = _httpClientFactory.CreateClient(NamedClient.Default);
-
-            // Build playback info request — same body the Jellyfin web client sends
-            var requestBody = new PlaybackInfoRequest
-            {
-                DeviceId = deviceId,
-                Client = "Jellyfin Web",
-                EnableAutoStream = true,
-                EnableDirectPlay = true,
-                EnableDirectStream = true,
-                EnableTranscoding = true,
-                AllowAudioStreamCopy = true,
-                AllowVideoStreamCopy = true
-            };
-
-            var apiRequest = new HttpRequestMessage(HttpMethod.Post, apiUrl)
-            {
-                Content = JsonContent(requestBody)
-            };
-
-            // Forward authorization and device headers
-            if (requestHeaders.TryGetValue("X-Emby-Authorization", out var auth))
-                apiRequest.Headers.TryAddWithoutValidation("X-Emby-Authorization", auth.ToString());
-            if (requestHeaders.TryGetValue("X-Emby-Client", out var clientVer))
-                apiRequest.Headers.TryAddWithoutValidation("X-Emby-Client", clientVer.ToString());
-            apiRequest.Headers.TryAddWithoutValidation("X-Emby-Client-Device-Id", deviceId);
-
-            var response = await client.SendAsync(apiRequest, cancellationToken).ConfigureAwait(false);
-            var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-
-            if (debugEnabled)
-                _logger.LogInformation("[PlaybackIndicator] PlaybackInfo API response ({StatusCode}): {Body}", response.StatusCode, json.Length > 500 ? json[..500] + "..." : json);
-
-            if (!response.IsSuccessStatusCode)
-            {
-                _logger.LogWarning("[PlaybackIndicator] PlaybackInfo API returned {StatusCode}: {Body}", response.StatusCode, json);
-                return new PlaybackStatusResult
+                return Task.FromResult(new PlaybackStatusResult
                 {
                     ItemId = itemId,
                     Status = PlaybackStatus.Unknown,
-                    Reason = $"API error: {response.StatusCode}"
-                };
+                    Reason = "Invalid item ID"
+                });
             }
 
-            var playbackInfo = JsonSerializer.Deserialize<PlaybackInfoResponse>(json, JsonOptions);
+            var item = _libraryManager.GetItemById(itemGuid);
+            if (item is null)
+            {
+                return Task.FromResult(new PlaybackStatusResult
+                {
+                    ItemId = itemId,
+                    Status = PlaybackStatus.Unknown,
+                    Reason = "Item not found"
+                });
+            }
+
+            // Get media sources from the internal API — no HTTP round-trip
+            var mediaSources = _mediaSourceManager.GetStaticMediaSources(item, true);
 
             if (debugEnabled)
-                _logger.LogInformation("[PlaybackIndicator] Deserialized: MediaSources count = {Count}", playbackInfo?.MediaSources?.Count ?? 0);
+                _logger.LogInformation("[PlaybackIndicator] Item {ItemId}: found {Count} media source(s)", itemId, mediaSources.Count);
 
-            var primarySource = playbackInfo?.MediaSources?.FirstOrDefault();
-            if (primarySource is null)
+            if (mediaSources.Count == 0)
             {
-                return new PlaybackStatusResult
+                return Task.FromResult(new PlaybackStatusResult
                 {
                     ItemId = itemId,
                     Status = PlaybackStatus.Unknown,
                     Reason = "No media source found"
-                };
+                });
             }
 
-            var transcodingReasons = primarySource.TranscodingReasons ?? [];
-            var isDirectPlay = primarySource.SupportsDirectPlay == true
-                && (!transcodingReasons.Any());
+            var source = mediaSources[0];
+            var videoStream = source.MediaStreams?.FirstOrDefault(s => s.Type == MediaStreamType.Video);
+            var audioStream = source.MediaStreams?.FirstOrDefault(s => s.Type == MediaStreamType.Audio && s.IsDefault)
+                           ?? source.MediaStreams?.FirstOrDefault(s => s.Type == MediaStreamType.Audio);
 
-            var status = isDirectPlay ? PlaybackStatus.DirectPlay
-                : primarySource.SupportsDirectStream == true && !transcodingReasons.Any(r => r.Contains("Video", StringComparison.OrdinalIgnoreCase)) ? PlaybackStatus.DirectStream
-                : transcodingReasons.Any() ? PlaybackStatus.WillTranscode
-                : PlaybackStatus.Unknown;
+            var videoCodec = videoStream?.Codec ?? string.Empty;
+            var audioCodec = audioStream?.Codec ?? string.Empty;
+            var container = source.Container ?? string.Empty;
+
+            // Determine playback status based on codec/container compatibility
+            var reasons = new List<string>();
+
+            if (!string.IsNullOrEmpty(videoCodec) && !CommonDirectPlayVideoCodecs.Contains(videoCodec) && !ExtendedVideoCodecs.Contains(videoCodec))
+                reasons.Add($"VideoCodecNotSupported ({videoCodec})");
+
+            if (!string.IsNullOrEmpty(audioCodec) && !CommonDirectPlayAudioCodecs.Contains(audioCodec))
+                reasons.Add($"AudioCodecNotSupported ({audioCodec})");
+
+            if (!string.IsNullOrEmpty(container) && !CommonDirectPlayContainers.Contains(container))
+                reasons.Add($"ContainerNotSupported ({container})");
+
+            // H265/HEVC and other extended codecs: mark as MayTranscode
+            bool videoIsExtendedOnly = !string.IsNullOrEmpty(videoCodec)
+                && !CommonDirectPlayVideoCodecs.Contains(videoCodec)
+                && ExtendedVideoCodecs.Contains(videoCodec);
+
+            PlaybackStatus status;
+            if (reasons.Count == 0 && !videoIsExtendedOnly)
+            {
+                status = PlaybackStatus.DirectPlay;
+            }
+            else if (reasons.Count == 0 && videoIsExtendedOnly)
+            {
+                // Extended codec (hevc, vp9, av1) — many clients handle it, but not all
+                status = PlaybackStatus.DirectPlay;
+                reasons.Add($"ExtendedCodec ({videoCodec}) — most clients direct-play this");
+            }
+            else
+            {
+                status = PlaybackStatus.WillTranscode;
+            }
 
             if (debugEnabled)
-                _logger.LogInformation("[PlaybackIndicator] Item {ItemId}: SupportsDirectPlay={DirectPlay}, SupportsDirectStream={DirectStream}, TranscodeReasons=[{Reasons}], FinalStatus={Status}",
-                    itemId, primarySource.SupportsDirectPlay, primarySource.SupportsDirectStream, string.Join(", ", transcodingReasons), status);
+                _logger.LogInformation(
+                    "[PlaybackIndicator] Item {ItemId}: Video={VideoCodec}, Audio={AudioCodec}, Container={Container}, Status={Status}, Reasons=[{Reasons}]",
+                    itemId, videoCodec, audioCodec, container, status, string.Join(", ", reasons));
 
-            return new PlaybackStatusResult
+            return Task.FromResult(new PlaybackStatusResult
             {
                 ItemId = itemId,
                 Status = status,
-                Reason = string.Join(", ", transcodingReasons),
-                DirectPlayEligible = isDirectPlay,
-                DirectStreamEligible = primarySource.SupportsDirectStream == true,
-                Container = primarySource.Container,
-                AudioCodec = primarySource.MediaStreams?
-                    .FirstOrDefault(s => s.Type == MediaStreamType.Audio)?.Codec,
-                VideoCodec = primarySource.MediaStreams?
-                    .FirstOrDefault(s => s.Type == MediaStreamType.Video)?.Codec,
-                TranscodingReasons = transcodingReasons.ToList()
-            };
+                Reason = string.Join(", ", reasons),
+                DirectPlayEligible = status == PlaybackStatus.DirectPlay,
+                DirectStreamEligible = source.SupportsDirectStream,
+                Container = container,
+                AudioCodec = audioCodec,
+                VideoCodec = videoCodec,
+                TranscodingReasons = reasons
+            });
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error calculating playback status for {ItemId}", itemId);
-            return new PlaybackStatusResult
+            _logger.LogError(ex, "[PlaybackIndicator] Error calculating playback status for {ItemId}", itemId);
+            return Task.FromResult(new PlaybackStatusResult
             {
                 ItemId = itemId,
                 Status = PlaybackStatus.Unknown,
                 Reason = ex.Message
-            };
+            });
         }
-    }
-
-    // ─── JSON Serialization ───────────────────────────────────────────────
-
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        PropertyNameCaseInsensitive = true,
-        Converters = { new JsonStringEnumConverter() }
-    };
-
-    private static System.Net.Http.Json.JsonContent JsonContent(object value) =>
-        System.Net.Http.Json.JsonContent.Create(value, options: JsonOptions);
-
-    // ─── DTOs ─────────────────────────────────────────────────────────────
-
-    internal class PlaybackInfoRequest
-    {
-        [JsonPropertyName("DeviceId")]
-        public string DeviceId { get; set; } = string.Empty;
-
-        [JsonPropertyName("Client")]
-        public string Client { get; set; } = "Jellyfin Web";
-
-        [JsonPropertyName("EnableAutoStream")]
-        public bool EnableAutoStream { get; set; } = true;
-
-        [JsonPropertyName("EnableDirectPlay")]
-        public bool EnableDirectPlay { get; set; } = true;
-
-        [JsonPropertyName("EnableDirectStream")]
-        public bool EnableDirectStream { get; set; } = true;
-
-        [JsonPropertyName("EnableTranscoding")]
-        public bool EnableTranscoding { get; set; } = true;
-
-        [JsonPropertyName("AllowAudioStreamCopy")]
-        public bool AllowAudioStreamCopy { get; set; } = true;
-
-        [JsonPropertyName("AllowVideoStreamCopy")]
-        public bool AllowVideoStreamCopy { get; set; } = true;
-    }
-
-    internal class PlaybackInfoResponse
-    {
-        [JsonPropertyName("MediaSources")]
-        public List<MediaSourceDto>? MediaSources { get; set; }
-    }
-
-    internal class MediaSourceDto
-    {
-        [JsonPropertyName("Id")]
-        public string? Id { get; set; }
-
-        [JsonPropertyName("Container")]
-        public string? Container { get; set; }
-
-        [JsonPropertyName("SupportsDirectPlay")]
-        public bool SupportsDirectPlay { get; set; }
-
-        [JsonPropertyName("SupportsDirectStream")]
-        public bool SupportsDirectStream { get; set; }
-
-        [JsonPropertyName("TranscodingReasons")]
-        public List<string>? TranscodingReasons { get; set; }
-
-        [JsonPropertyName("MediaStreams")]
-        public List<MediaStreamDto>? MediaStreams { get; set; }
-    }
-
-    internal class MediaStreamDto
-    {
-        [JsonPropertyName("Type")]
-        public MediaStreamType Type { get; set; }
-
-        [JsonPropertyName("Codec")]
-        public string? Codec { get; set; }
-    }
-
-    internal enum MediaStreamType
-    {
-        Video = 0,
-        Audio = 1,
-        Subtitle = 2
     }
 }
 
