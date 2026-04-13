@@ -1,464 +1,550 @@
 /**
- * Jellyfin Playback Indicator
- * Injects direct-play / transcode badges on episode and movie rows.
- * Works by calling Jellyfin's GetPostedPlaybackInfo API with the current device profile.
+ * Jellyfin Playback Indicator v2.2
+ * Shows Direct Play / Direct Stream / Transcode badges on items.
+ * Uses Jellyfin's REAL PlaybackInfo API with the actual device profile.
+ *
+ * States:
+ *  ✅ Direct Play   — container + video + audio all native
+ *  ⚠️ Direct Stream — container + video supported, audio transcode (remux)
+ *  ❌ Transcode     — video needs transcode (or mkv + unsupported audio = risky)
  */
 (function () {
     'use strict';
 
-    const PLUGIN_ID = 'playback-indicator';
-    const CACHE_PREFIX = 'jpi_cache_';
-    const DEFAULT_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+    const CACHE_PREFIX = 'jpi_v2_';
+    const DEFAULT_CACHE_TTL_MS = 60 * 60 * 1000;
+    const SCAN_INTERVAL_MS = 2500;
 
-    // Badge states
-    const BADGE_DIRECT = { cls: 'jpi-badge-direct', icon: '&#x2705;', label: 'Direct Play' };
-    const BADGE_TRANSCODE = { cls: 'jpi-badge-transcode', icon: '&#x26A0;', label: 'Will Transcode' };
-    const BADGE_LOADING = { cls: 'jpi-badge-loading', icon: '&#x1F504;', label: 'Checking...' };
-    const BADGE_ERROR = { cls: 'jpi-badge-error', icon: '&#x274C;', label: 'Error' };
+    const BADGES = {
+        direct:    { cls: 'jpi-direct',    icon: '✅', label: 'Direct Play' },
+        stream:    { cls: 'jpi-stream',    icon: '⚠️', label: 'Direct Stream' },
+        transcode: { cls: 'jpi-transcode', icon: '❌', label: 'Transcode' },
+        loading:   { cls: 'jpi-loading',   icon: '⏳', label: 'Checking...' }
+    };
 
-    // ─── Utility ────────────────────────────────────────────────────────────────
+    // MKV + unsupported audio often fails on phones/TVs
+    const TRANSCODE_RISKY_CONTAINERS = new Set(['mkv', 'avi', 'ogv', 'flv']);
+
+    let _intervals = [];
+    let _destroyed = false;
+    let _lastUrl = '';
+    let _codecFingerprint = null;
+
+    // ─── Cleanup (uninstall safe) ────────────────────────────────────────────
+
+    function cleanup() {
+        _destroyed = true;
+        _intervals.forEach(id => clearInterval(id));
+        _intervals = [];
+        document.getElementById('jpi-styles')?.remove();
+        document.querySelectorAll('.jpi-badge').forEach(b => b.remove());
+        Object.keys(localStorage)
+            .filter(k => k.startsWith(CACHE_PREFIX))
+            .forEach(k => localStorage.removeItem(k));
+    }
+    window.__jpi_cleanup = cleanup;
+
+    // ─── Codec Fingerprint ───────────────────────────────────────────────────
+
+    /**
+     * Build a short hash of the browser's actual codec support.
+     * This ensures the cache is truly per-device even if deviceId is shared.
+     */
+    function getCodecFingerprint() {
+        if (_codecFingerprint) return _codecFingerprint;
+        try {
+            var video = document.createElement('video');
+            var canPlay = function (type) { try { return video.canPlayType(type); } catch (_) { return ''; } };
+            var tests = [
+                canPlay('video/mp4; codecs="avc1.42E01E"'),
+                canPlay('video/mp4; codecs="hvc1"'),
+                canPlay('video/mp4; codecs="hev1"'),
+                canPlay('video/webm; codecs="vp9"'),
+                canPlay('video/mp4; codecs="av01.0.01M.08"'),
+                canPlay('audio/mp4; codecs="mp4a.40.2"'),
+                canPlay('audio/webm; codecs="opus"'),
+                canPlay('audio/mpeg'),
+                canPlay('audio/flac'),
+                canPlay('audio/mp4; codecs="ac-3"'),
+                canPlay('audio/mp4; codecs="mp4a.a6"'),  // DTS
+                canPlay('audio/mp4; codecs="dtsc"')       // DTS
+            ];
+            // Map: '' -> 0, 'maybe' -> 1, 'probably' -> 2
+            _codecFingerprint = tests.map(function (r) {
+                return r === 'probably' ? '2' : (r === 'maybe' ? '1' : '0');
+            }).join('');
+        } catch (_) {
+            _codecFingerprint = 'unknown';
+        }
+        return _codecFingerprint;
+    }
+
+    // ─── Cache ───────────────────────────────────────────────────────────────
 
     function getCache(key) {
         try {
-            var raw = localStorage.getItem(CACHE_PREFIX + key);
+            const raw = localStorage.getItem(CACHE_PREFIX + key);
             if (!raw) return null;
-            var entry = JSON.parse(raw);
-            if (Date.now() > entry.expires) {
-                localStorage.removeItem(CACHE_PREFIX + key);
-                return null;
-            }
+            const entry = JSON.parse(raw);
+            if (Date.now() > entry.expires) { localStorage.removeItem(CACHE_PREFIX + key); return null; }
             return entry.data;
+        } catch (_) { return null; }
+    }
+
+    function setCache(key, data, ttlMs) {
+        try {
+            localStorage.setItem(CACHE_PREFIX + key, JSON.stringify({
+                data, expires: Date.now() + (ttlMs || DEFAULT_CACHE_TTL_MS)
+            }));
+        } catch (_) { }
+    }
+
+    // ─── Jellyfin API ────────────────────────────────────────────────────────
+
+    function getApiClient() {
+        return window.ApiClient || null;
+    }
+
+    /**
+     * Get the device profile for the CURRENT device/browser.
+     * Jellyfin's web client builds this internally — we access it via the
+     * playback capabilities detection. Falls back to a basic browser profile.
+     */
+    function getDeviceProfile() {
+        // Method 1: Jellyfin's internal profile builder
+        // The web client stores capabilities in the connection manager
+        if (window.ConnectionManager) {
+            try {
+                const apiClient = window.ConnectionManager.getApiClient(
+                    window.ConnectionManager._servers?.[0]?.id
+                );
+                if (apiClient?._deviceProfile) return apiClient._deviceProfile;
+            } catch (_) { }
+        }
+
+        // Method 2: Build from what the browser actually supports
+        // Using HTML5 video element capability detection
+        try {
+            const video = document.createElement('video');
+            const canPlay = (type) => { try { return video.canPlayType(type); } catch (_) { return ''; } };
+
+            const supportsH264 = canPlay('video/mp4; codecs="avc1.42E01E"') !== '';
+            const supportsHevc = canPlay('video/mp4; codecs="hvc1"') !== '' || canPlay('video/mp4; codecs="hev1"') !== '';
+            const supportsVP9 = canPlay('video/webm; codecs="vp9"') !== '';
+            const supportsAV1 = canPlay('video/mp4; codecs="av01.0.01M.08"') !== '';
+
+            const supportsAAC = canPlay('audio/mp4; codecs="mp4a.40.2"') !== '';
+            const supportsOpus = canPlay('audio/webm; codecs="opus"') !== '';
+            const supportsMP3 = canPlay('audio/mpeg') !== '';
+            const supportsFLAC = canPlay('audio/flac') !== '';
+            const supportsAC3 = canPlay('audio/mp4; codecs="ac-3"') !== '' || canPlay('audio/ac3') !== '';
+            const supportsDTS = canPlay('audio/mp4; codecs="mp4a.a6"') !== '' || canPlay('audio/mp4; codecs="dtsc"') !== '';
+
+            // Build a DirectPlayProfile for this browser
+            const videoCodecs = [];
+            if (supportsH264) videoCodecs.push('h264');
+            if (supportsHevc) videoCodecs.push('hevc', 'h265');
+            if (supportsVP9) videoCodecs.push('vp9');
+            if (supportsAV1) videoCodecs.push('av1');
+
+            const audioCodecs = [];
+            if (supportsAAC) audioCodecs.push('aac');
+            if (supportsOpus) audioCodecs.push('opus');
+            if (supportsMP3) audioCodecs.push('mp3');
+            if (supportsFLAC) audioCodecs.push('flac');
+            if (supportsAC3) audioCodecs.push('ac3', 'eac3');
+            if (supportsDTS) audioCodecs.push('dts', 'dca');
+
+            return {
+                Name: 'PlaybackIndicator Detected',
+                MaxStreamingBitrate: 120000000,
+                MaxStaticBitrate: 120000000,
+                DirectPlayProfiles: [
+                    {
+                        Container: 'mp4,m4v,mov',
+                        AudioCodec: audioCodecs.join(','),
+                        VideoCodec: videoCodecs.join(','),
+                        Type: 'Video'
+                    },
+                    {
+                        Container: 'mkv,webm',
+                        AudioCodec: audioCodecs.join(','),
+                        VideoCodec: videoCodecs.join(','),
+                        Type: 'Video'
+                    },
+                    {
+                        Container: 'ts,mpegts',
+                        AudioCodec: audioCodecs.join(','),
+                        VideoCodec: videoCodecs.join(','),
+                        Type: 'Video'
+                    }
+                ],
+                TranscodingProfiles: [
+                    {
+                        Container: 'ts',
+                        Type: 'Video',
+                        VideoCodec: 'h264',
+                        AudioCodec: 'aac,mp3',
+                        Context: 'Streaming',
+                        Protocol: 'hls'
+                    }
+                ]
+            };
         } catch (_) {
             return null;
         }
     }
 
-    function setCache(key, data, ttlMs) {
-        try {
-            var entry = { data: data, expires: Date.now() + (ttlMs || DEFAULT_CACHE_TTL_MS) };
-            localStorage.setItem(CACHE_PREFIX + key, JSON.stringify(entry));
-        } catch (_) { }
-    }
-
-    function getDeviceId() {
-        // Use Jellyfin's stored device ID from the API client
-        if (window.ConnectionManager) {
-            var servers = window.ConnectionManager._servers || [];
-            for (var i = 0; i < servers.length; i++) {
-                var server = servers[i];
-                if (server.deviceId) return server.deviceId;
-            }
-        }
-        return 'unknown';
-    }
-
-    function getCurrentServerInfo() {
-        if (window.ConnectionManager) {
-            var servers = window.ConnectionManager._servers || [];
-            for (var i = 0; i < servers.length; i++) {
-                var server = servers[i];
-                if (server.accessToken) return server;
-            }
-        }
-        return null;
-    }
-
-    function buildAuthHeader(serverInfo) {
-        if (!serverInfo) return '';
-        var userId = serverInfo.userId || '';
-        var deviceId = serverInfo.deviceId || '';
-        var tokenType = window.ApiClient ? 'MediaBrowser' : 'Emby';
-        return 'MediaBrowser UserId="' + userId + '", DeviceId="' + deviceId + '", Token="' + serverInfo.accessToken + '"';
-    }
-
-    // ─── API Calls ───────────────────────────────────────────────────────────────
-
     /**
-     * Fetch device profile from Jellyfin's API client.
-     * We read the active profile from the session's playback profile.
-     */
-    function getCurrentDeviceProfile() {
-        // The Jellyfin web client stores the device profile in AppStorage
-        // or in the active user session. We try window.AppHost first.
-        var profile = null;
-
-        if (window.AppHost) {
-            try {
-                profile = window.AppHost.profile;
-            } catch (_) { }
-        }
-
-        if (!profile && window.SessionManager) {
-            try {
-                var sessions = window.SessionManager.sessionModel ? [window.SessionManager.sessionModel] : [];
-                for (var i = 0; i < sessions.length; i++) {
-                    if (sessions[i].playbackProfile) {
-                        profile = sessions[i].playbackProfile;
-                        break;
-                    }
-                }
-            } catch (_) { }
-        }
-
-        if (!profile) {
-            // Fallback to a sensible default profile for modern browsers
-            profile = {
-                Name: 'Jellyfin Web',
-                Id: null,
-                Type: 'Browser',
-                IsLocalPlayback: false,
-                SupportsExternalDisplay: false,
-                SupportsAV1: true,
-                SupportsVP9: true,
-                SupportsVP8: true,
-                SupportsH264: true,
-                SupportsH265: true,
-                SupportsH263: false,
-                SupportsMPEG4Part2: false,
-                SupportsMPEG1Video: true,
-                SupportsMPEG2Video: true,
-                SupportsMPEG1Audio: true,
-                SupportsAAC: true,
-                SupportsMP3: true,
-                SupportsFLAC: true,
-                SupportsALAC: true,
-                SupportsOpus: true,
-                SupportsVorbis: true,
-                SupportsWMAPro: false,
-                SupportsWMA: true,
-                SupportsDTS: true,
-                SupportsDTSHD: true,
-                SupportsTrueHD: true,
-                SupportsEAC3: true,
-                SupportsEAC3Atmos: true,
-                SupportsDTSAtmos: true,
-                SupportsTrueHDAtmos: true,
-                SupportsAACLatm: false,
-                SupportsAc3: true,
-                SupportsAsf: false,
-                SupportsFMP4: true,
-                SupportsWebS Subtitles: true,
-                SupportsBandwidthLimitedDirectPlay: true,
-                RequiresVideoTranscoding: false,
-                RequiresAudioTranscoding: false,
-                RequiresLossyAudioTranscoding: false,
-                RequiresNoColorSpaceConversion: false,
-                RequiresNoVideoDepthConversion: false,
-                RequiresVideoBitrateMatches: false,
-                RequiresVideoBitrateLessThan: false,
-                RequiresAudioBitrateMatches: false,
-                RequiresAudioBitrateLessThan: false,
-                RequiresVideoResolutionLessThan: false,
-                RequiresVideoResolutionMatches: false,
-                RequiresVideoCodecSelection: false,
-                RequiresAudioCodecSelection: false,
-                CodecProfiles: [],
-                ResponseProfiles: [],
-                DirectPlayProfiles: [
-                    {
-                        Protocol: 'hls',
-                        Container: 'mp4,m4v',
-                        AudioCodec: 'aac,mp3,ac3',
-                        VideoCodec: 'h264,h265,av1'
-                    },
-                    {
-                        Protocol: 'http',
-                        Container: 'mkv,mp4,m4v,mov,mpegts,mpeg,mpeg2video',
-                        AudioCodec: 'aac,mp3,ac3,eac3,opus,flac,alac,pcm',
-                        VideoCodec: 'h264,h265,av1,mpeg1video,mpeg2video,vp8,vp9'
-                    },
-                    {
-                        Protocol: 'file',
-                        Container: 'mkv,mp4,m4v,mov,avi,mpeg,mpg,ts,webm',
-                        AudioCodec: 'aac,mp3,ac3,eac3,opus,flac,alac,pcm',
-                        VideoCodec: 'h264,h265,av1,mpeg1video,mpeg2video,vp8,vp9'
-                    }
-                ]
-            };
-        }
-
-        return profile;
-    }
-
-    /**
-     * Call Jellyfin's GetPostedPlaybackInfo endpoint for an item.
-     * Returns a promise resolving to { isEligibleForDirectPlay, transcodingReasons }.
+     * Call Jellyfin's POST /Items/{id}/PlaybackInfo with the REAL device profile.
      */
     function fetchPlaybackInfo(itemId) {
         return new Promise(function (resolve, reject) {
-            var serverInfo = getCurrentServerInfo();
-            if (!serverInfo || !serverInfo.accessToken) {
-                // Not logged in — skip silently
-                reject(new Error('not authenticated'));
-                return;
-            }
+            const apiClient = getApiClient();
+            if (!apiClient) { reject(new Error('no ApiClient')); return; }
 
-            var profile = getCurrentDeviceProfile();
-            var deviceId = serverInfo.deviceId || getDeviceId();
+            const userId = apiClient.getCurrentUserId ? apiClient.getCurrentUserId() : (apiClient._currentUser?.Id || '');
+            const deviceProfile = getDeviceProfile();
 
-            var requestBody = {
-                UserId: serverInfo.userId || '',
-                DeviceProfile: profile,
-                DeviceId: deviceId,
-                MediaSourceId: null,
-                PlaybackMediaSourceUrl: null,
-                AutoOpenLiveStream: false,
-                MaxStreamingBitrate: null,
-                MaxAudioChannels: null,
-                StartTimeTicks: null,
-                LiveStreamId: null,
+            const body = {
+                UserId: userId,
+                DeviceProfile: deviceProfile,
+                MaxStreamingBitrate: 120000000,
+                StartTimeTicks: 0,
                 IsPlayback: false,
-                AutoCorrect文史: false,
-                EnableMsProstituting: false,
-                AllowAudioLiveStreams: false,
-                CurrentRuntimeTicks: null,
-                ControllerData: null
+                AutoOpenLiveStream: false
             };
 
-            var url = serverInfo.serverUrl + '/Items/' + itemId + '/PlaybackInfo';
+            const serverAddr = apiClient._serverAddress || (apiClient.serverAddress ? apiClient.serverAddress() : '');
+            const url = serverAddr + '/Items/' + itemId + '/PlaybackInfo';
 
-            var xhr = new XMLHttpRequest();
-            xhr.open('POST', url, true);
-            xhr.setRequestHeader('Content-Type', 'application/json');
-            xhr.setRequestHeader('X-Emby-Authorization', buildAuthHeader(serverInfo));
-            xhr.setRequestHeader('X-Media-Browser-Client', 'Jellyfin Web');
-            xhr.setRequestHeader('X-Media-Browser-Client-Version', window.EmbyServerVersion || '10.11.0');
+            const xhr = new XMLHttpRequest();
+            xhr.timeout = 8000;
 
             xhr.onload = function () {
-                if (xhr.status === 200 || xhr.status === 201) {
+                if (xhr.status >= 200 && xhr.status < 300) {
                     try {
-                        var response = JSON.parse(xhr.responseText);
-                        var eligible = response.IsEligibleForDirectPlay !== false;
-                        var reasons = response.TranscodingReasons || [];
-                        resolve({
-                            isEligibleForDirectPlay: eligible && reasons.length === 0,
-                            transcodingReasons: reasons,
-                            playbackSources: response.PlaybackSources || []
-                        });
-                    } catch (e) {
-                        reject(new Error('parse error'));
-                    }
-                } else {
-                    reject(new Error('http ' + xhr.status));
-                }
+                        resolve(parsePlaybackResponse(JSON.parse(xhr.responseText)));
+                    } catch (e) { reject(new Error('parse error')); }
+                } else { reject(new Error('http ' + xhr.status)); }
             };
-
             xhr.onerror = function () { reject(new Error('network error')); };
+            xhr.ontimeout = function () { reject(new Error('timeout')); };
 
-            try {
-                xhr.send(JSON.stringify(requestBody));
-            } catch (e) {
-                reject(e);
-            }
+            xhr.open('POST', url, true);
+            xhr.setRequestHeader('Content-Type', 'application/json');
+
+            // Build auth header
+            const token = apiClient.accessToken ? apiClient.accessToken() : '';
+            const deviceId = apiClient.deviceId ? apiClient.deviceId() : '';
+            const clientName = apiClient._clientName || 'Jellyfin Web';
+            const clientVersion = apiClient._clientVersion || '10.11.0';
+            const deviceName = apiClient._deviceName || 'Browser';
+
+            xhr.setRequestHeader('X-Emby-Authorization',
+                'MediaBrowser Client="' + clientName + '", Device="' + deviceName +
+                '", DeviceId="' + deviceId + '", Version="' + clientVersion +
+                '", Token="' + token + '"');
+
+            xhr.send(JSON.stringify(body));
         });
     }
 
-    // ─── DOM Injection ──────────────────────────────────────────────────────────
+    /**
+     * Parse the actual Jellyfin PlaybackInfo response.
+     *
+     * MediaSources[].SupportsDirectPlay / SupportsDirectStream / SupportsTranscoding
+     * tell us what the SERVER decided this device can do.
+     */
+    function parsePlaybackResponse(resp) {
+        const sources = resp.MediaSources || [];
+        if (sources.length === 0) {
+            return { type: 'transcode', reason: 'no sources' };
+        }
 
-    function createBadgeElement(state, itemId) {
-        var span = document.createElement('span');
-        span.className = 'jpi-badge ' + state.cls;
-        span.setAttribute('title', state.label + ' — ' + itemId);
-        span.setAttribute('data-item-id', itemId);
-        span.innerHTML = '<span class="jpi-badge-icon">' + state.icon + '</span>';
+        const src = sources[0];
+        const container = (src.Container || '').toLowerCase();
+
+        // DirectPlay = everything native, no remuxing
+        if (src.SupportsDirectPlay) {
+            return { type: 'direct', reason: null, container };
+        }
+
+        // DirectStream = container remuxed, video copied, audio may transcode
+        if (src.SupportsDirectStream) {
+            const audioCodec = getStreamCodec(src, 'Audio');
+
+            // MKV + unsupported audio is unreliable on phones/TVs
+            if (TRANSCODE_RISKY_CONTAINERS.has(container) && !src.SupportsDirectPlay) {
+                // If it only supports DirectStream (not DirectPlay) for MKV,
+                // it means audio needs transcode — mark as risky transcode
+                return {
+                    type: 'transcode',
+                    reason: container.toUpperCase() + ' + ' + (audioCodec || '?') + ' audio — may fail on this device',
+                    container
+                };
+            }
+
+            return {
+                type: 'stream',
+                reason: 'video direct, audio transcode (' + (audioCodec || '?') + ')',
+                container
+            };
+        }
+
+        // Full transcode
+        if (src.SupportsTranscoding) {
+            return { type: 'transcode', reason: 'video + audio transcode', container };
+        }
+
+        // Nothing supported
+        return { type: 'transcode', reason: 'not playable on this device', container };
+    }
+
+    function getStreamCodec(source, streamType) {
+        const stream = (source.MediaStreams || []).find(s => s.Type === streamType);
+        return stream ? (stream.Codec || '').toLowerCase() : null;
+    }
+
+    // ─── Badge DOM ───────────────────────────────────────────────────────────
+
+    function injectStyles() {
+        if (document.getElementById('jpi-styles')) return;
+        const css = document.createElement('style');
+        css.id = 'jpi-styles';
+        css.textContent = [
+            /* Overlay badge on card images (top-right corner) */
+            '.jpi-card-wrapper { position: relative; }',
+            '.jpi-badge-overlay {',
+            '  position: absolute; top: 4px; right: 4px; z-index: 10;',
+            '  display: inline-flex; align-items: center; gap: 3px;',
+            '  padding: 2px 6px; border-radius: 4px;',
+            '  font-size: 10px; font-weight: 700; line-height: 1.3;',
+            '  white-space: nowrap; cursor: default;',
+            '  text-shadow: 0 1px 2px rgba(0,0,0,0.6);',
+            '  font-family: inherit !important;',
+            '  pointer-events: none !important;',
+            '  box-shadow: 0 1px 3px rgba(0,0,0,0.4);',
+            '}',
+            /* Inline badge for list/episode rows (end of row) */
+            '.jpi-badge-inline {',
+            '  display: inline-flex; align-items: center; gap: 3px;',
+            '  margin-left: auto; padding: 1px 6px; border-radius: 4px;',
+            '  font-size: 10px; font-weight: 600; line-height: 1.4;',
+            '  white-space: nowrap; cursor: default; flex-shrink: 0;',
+            '  text-shadow: none; font-family: inherit !important;',
+            '  pointer-events: none !important;',
+            '}',
+            '.jpi-direct { background: rgba(26,107,42,0.9); color: #fff; }',
+            '.jpi-stream { background: rgba(122,95,0,0.9); color: #fff; }',
+            '.jpi-transcode { background: rgba(139,26,26,0.9); color: #fff; }',
+            '.jpi-loading { background: rgba(68,68,68,0.9); color: #ccc; animation: jpi-pulse 1.5s ease-in-out infinite; }',
+            '@keyframes jpi-pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }'
+        ].join('\n');
+        (document.head || document.documentElement).appendChild(css);
+    }
+
+    function createBadge(type, itemId, reason, isOverlay) {
+        const badge = BADGES[type] || BADGES.loading;
+        const span = document.createElement('span');
+        span.className = (isOverlay ? 'jpi-badge-overlay ' : 'jpi-badge-inline ') + badge.cls;
+        span.setAttribute('data-jpi', itemId);
+        span.setAttribute('title', badge.label + (reason ? ' — ' + reason : ''));
+        span.textContent = badge.icon + ' ' + badge.label;
         return span;
     }
 
-    function injectBadge(row, itemId, state) {
-        // Avoid double-injection
-        if (row.querySelector('.jpi-badge')) return;
+    // ─── Item Detection ──────────────────────────────────────────────────────
 
-        var badge = createBadgeElement(state, itemId);
+    function getItemId(el) {
+        let id = el.getAttribute('data-id') || el.getAttribute('data-itemid');
+        if (id && id.length > 5) return id;
 
-        // Try to find the name element within the row
-        var nameEl = row.querySelector('.予-seriesEpisodeName, .media-name, [class*="name"], .cardName, a[data-id]');
-        if (nameEl) {
-            nameEl.insertAdjacentElement('afterend', badge);
-        } else {
-            // Fallback: prepend to the row
-            row.insertAdjacentElement('afterbegin', badge);
-        }
-    }
-
-    function getItemIdFromRow(row) {
-        return row.getAttribute('data-id')
-            || row.getAttribute('data-seriesid')
-            || (row.querySelector('a[data-id]') || row.querySelector('a[href*="/libraries/items/"]') || {}).getAttribute('href', '').split('/').pop()
-            || null;
-    }
-
-    // ─── Page Scanning ──────────────────────────────────────────────────────────
-
-    function scanAndAnnotate() {
-        var rows = [];
-
-        // Series/Season episode list: rows with .episodeItem or .listItem
-        var episodeRows = document.querySelectorAll(
-            '.episodeItem, .listItem, paper-item[data-id], [data-id].episode, [data-id].listItem'
-        );
-
-        // Movie cards
-        var movieCards = document.querySelectorAll(
-            '.card, .metadata-section, [data-id].movie, [data-type="Movie"] .card'
-        );
-
-        // Prefer pages with visible items
-        var targetRows = [];
-        if (episodeRows.length > 0) {
-            targetRows = Array.prototype.slice.call(episodeRows);
-        } else if (movieCards.length > 0) {
-            targetRows = Array.prototype.slice.call(movieCards);
+        // Check links inside the element
+        const link = el.querySelector('a[data-id], a[href*="/items/"], a[href*="id="]');
+        if (link) {
+            id = link.getAttribute('data-id');
+            if (id && id.length > 5) return id;
+            const href = link.getAttribute('href') || '';
+            var match = href.match(/\/items\/([0-9a-f-]+)/i) || href.match(/[?&]id=([0-9a-f-]+)/i);
+            if (match) return match[1];
         }
 
-        if (targetRows.length === 0) return;
+        // Check any child with data-id
+        const btn = el.querySelector('[data-id]');
+        if (btn) {
+            id = btn.getAttribute('data-id');
+            if (id && id.length > 5) return id;
+        }
 
-        var cfg = getPluginConfig();
-        var ttl = (cfg.cacheTtlMinutes || 60) * 60 * 1000;
-        var deviceKey = getDeviceId();
+        return null;
+    }
 
-        for (var i = 0; i < targetRows.length; i++) {
-            var row = targetRows[i];
-            var itemId = getItemIdFromRow(row);
-            if (!itemId || itemId.length < 5) continue;
+    /**
+     * Find media item elements in the DOM.
+     * Jellyfin 10.11 uses React-based cards with various class patterns.
+     * We look broadly for any element with data-id that looks like a card or list item.
+     */
+    function findItemElements() {
+        // Broad card selectors for Jellyfin 10.11 React UI
+        var selectors = [
+            // Classic card selectors
+            '.card[data-id]',
+            '[data-id].card',
+            // React-based card wrappers (10.11+)
+            '[data-id][class*="card"]',
+            '[data-id][class*="Card"]',
+            // Item cards with various naming
+            '[data-id][class*="itemCard"]',
+            '[data-id][class*="portraitCard"]',
+            '[data-id][class*="landscapeCard"]',
+            '[data-id][class*="squareCard"]',
+            '[data-id][class*="bannerCard"]',
+            '[data-id][class*="backdropCard"]',
+            // List and episode items
+            '[data-id].listItem',
+            '[data-id].episodeItem',
+            '.listItem[data-id]',
+            '[data-id][class*="listItem"]',
+            '[data-id][class*="episode"]',
+            // Generic: any interactive item wrapper with a data-id that
+            // contains an image (strong signal it's a media card)
+            '[data-id] .cardImageContainer',
+            '[data-id] [class*="cardImage"]',
+            '[data-id] [class*="CardImage"]'
+        ];
 
-            // Skip already-processed
-            if (row.querySelector('.jpi-badge')) continue;
+        var seen = new Set();
+        var results = [];
 
-            var cacheKey = itemId + '_' + deviceKey;
-            var cached = getCache(cacheKey);
+        selectors.forEach(function (sel) {
+            try {
+                document.querySelectorAll(sel).forEach(function (el) {
+                    // For child-match selectors, walk up to the data-id ancestor
+                    var target = el.closest('[data-id]') || el;
+                    if (!target.getAttribute('data-id')) return;
+                    var id = target.getAttribute('data-id');
+                    if (seen.has(id)) return;
+                    if (target.querySelector('[data-jpi]')) return;
+                    seen.add(id);
+                    results.push(target);
+                });
+            } catch (_) { }
+        });
+
+        return results;
+    }
+
+    /**
+     * Determine if an element is a card (has image) vs a list/episode row.
+     */
+    function isCardElement(el) {
+        return !!(
+            el.querySelector('.cardImageContainer, [class*="cardImage"], [class*="CardImage"], .cardBox, [class*="cardBox"]') ||
+            el.classList.toString().match(/card/i)
+        );
+    }
+
+    // ─── Scan ────────────────────────────────────────────────────────────────
+
+    function scan() {
+        if (_destroyed) return;
+        const elements = findItemElements();
+        if (elements.length === 0) return;
+
+        const apiClient = getApiClient();
+        if (!apiClient) return;
+
+        const deviceId = apiClient.deviceId ? apiClient.deviceId() : 'default';
+        const fingerprint = getCodecFingerprint();
+
+        elements.forEach(function (el) {
+            const itemId = getItemId(el);
+            if (!itemId) return;
+
+            // Cache key includes deviceId AND codec fingerprint for true per-device isolation
+            const cacheKey = itemId + '_' + deviceId + '_' + fingerprint;
+            const cached = getCache(cacheKey);
 
             if (cached) {
-                var state = cached.isEligible ? BADGE_DIRECT : BADGE_TRANSCODE;
-                injectBadge(row, itemId, state);
+                placeBadge(el, itemId, cached.type, cached.reason);
             } else {
-                // Show loading badge
-                injectBadge(row, itemId, BADGE_LOADING);
+                placeBadge(el, itemId, 'loading');
+                fetchPlaybackInfo(itemId).then(function (result) {
+                    if (_destroyed) return;
+                    removeBadges(el);
+                    placeBadge(el, itemId, result.type, result.reason);
+                    setCache(cacheKey, { type: result.type, reason: result.reason });
+                }).catch(function () {
+                    removeBadges(el);
+                });
+            }
+        });
+    }
 
-                // Fetch live
-                (function (row, itemId, cacheKey, ttl) {
-                    fetchPlaybackInfo(itemId).then(function (result) {
-                        var state = result.isEligibleForDirectPlay ? BADGE_DIRECT : BADGE_TRANSCODE;
-                        injectBadge(row, itemId, state);
-                        setCache(cacheKey, { isEligible: result.isEligibleForDirectPlay }, ttl);
+    /**
+     * Place badge in the right location depending on element type.
+     * Cards: overlay on top-right of the card image.
+     * List/episode rows: append at the end of the row.
+     */
+    function placeBadge(el, itemId, type, reason) {
+        if (el.querySelector('[data-jpi="' + itemId + '"]')) return;
 
-                        // Invalidate when user plays the item
-                        window.addEventListener('beforeunload', function onPlay() {
-                            localStorage.removeItem(CACHE_PREFIX + cacheKey);
-                            window.removeEventListener('beforeunload', onPlay);
-                        }, { once: true });
-                    }).catch(function (err) {
-                        // Silently remove loading badge on error rather than showing error badge
-                        var badge = row.querySelector('.jpi-badge-loading');
-                        if (badge) badge.remove();
-                        // Also remove any existing jpi badge
-                        var existing = row.querySelector('.jpi-badge');
-                        if (existing && existing.classList.contains('jpi-badge-loading')) existing.remove();
-                    });
-                })(row, itemId, cacheKey, ttl);
+        if (isCardElement(el)) {
+            // Find the card image container and overlay the badge
+            var imgContainer = el.querySelector(
+                '.cardImageContainer, [class*="cardImage"], [class*="CardImage"], .cardBox, [class*="cardBox"]'
+            );
+            if (imgContainer) {
+                // Ensure the container is positioned for absolute children
+                var pos = window.getComputedStyle(imgContainer).position;
+                if (pos === 'static') {
+                    imgContainer.style.position = 'relative';
+                }
+                imgContainer.appendChild(createBadge(type, itemId, reason, true));
+            } else {
+                // Fallback: put at end of element
+                el.appendChild(createBadge(type, itemId, reason, true));
+            }
+        } else {
+            // List/episode row: append inline badge at the end of the row
+            var rowBody = el.querySelector(
+                '.listItemBody, [class*="listItemBody"], [class*="episodeBody"], .itemBody'
+            );
+            if (rowBody) {
+                // Insert after the row body, not inside the name
+                rowBody.parentNode.insertBefore(createBadge(type, itemId, reason, false), rowBody.nextSibling);
+            } else {
+                el.appendChild(createBadge(type, itemId, reason, false));
             }
         }
     }
 
-    // ─── Plugin Config ─────────────────────────────────────────────────────────
-
-    function getPluginConfig() {
-        // Try reading from Jellyfin plugin config store
-        if (window.PluginManager) {
-            try {
-                var plugin = window.PluginManager.getPlugin('playback-indicator');
-                if (plugin && plugin.configuration) return plugin.configuration;
-            } catch (_) { }
-        }
-        return {
-            cacheTtlMinutes: 60,
-            showBadgeOnMovies: true,
-            showBadgeOnEpisodes: true
-        };
+    function removeBadges(el) {
+        el.querySelectorAll('[data-jpi]').forEach(function (b) { b.remove(); });
     }
 
-    // ─── SPA Router Hook ────────────────────────────────────────────────────────
-
-    var lastUrl = '';
-
-    function onRouteChanged() {
-        var currentUrl = window.location.href;
-        if (currentUrl === lastUrl) return;
-        lastUrl = currentUrl;
-
-        // Only process library/item pages — skip other routes
-        var isLibraryPage =
-            /\/libraries\/items\//.test(currentUrl) ||
-            /\/series\//.test(currentUrl) ||
-            /\/movies\//.test(currentUrl) ||
-            /\/tv\//.test(currentUrl) ||
-            /\/homev1\/items\//.test(currentUrl) ||
-            /page\(/.test(currentUrl) && !/search/.test(currentUrl);
-
-        if (!isLibraryPage) return;
-
-        // Allow DOM to settle before scanning
-        setTimeout(scanAndAnnotate, 800);
-    }
+    // ─── Init ────────────────────────────────────────────────────────────────
 
     function init() {
-        // Inject the badge stylesheet once
-        if (!document.getElementById('jpi-styles')) {
-            var style = document.createElement('style');
-            style.id = 'jpi-styles';
-            style.textContent = [
-                '.jpi-badge {',
-                '  display: inline-flex;',
-                '  align-items: center;',
-                '  gap: 3px;',
-                '  margin-left: 6px;',
-                '  padding: 1px 5px;',
-                '  border-radius: 4px;',
-                '  font-size: 11px;',
-                '  font-weight: 600;',
-                '  line-height: 1.4;',
-                '  vertical-align: middle;',
-                '  white-space: nowrap;',
-                '}',
-                '.jpi-badge-icon { font-size: 10px; }',
-                '.jpi-badge-direct { background: #1a6b2a; color: #ffffff; }',
-                '.jpi-badge-transcode { background: #7a5f00; color: #ffffff; }',
-                '.jpi-badge-loading { background: #333333; color: #cccccc; }',
-                '.jpi-badge-error { background: #6b1a1a; color: #ffffff; }',
-                // Jellyfin dark-theme compatible text
-                '.jpi-badge { text-shadow: none; }'
-            ].join('\n');
-            (document.head || document.documentElement).appendChild(style);
-        }
+        if (_destroyed) return;
+        injectStyles();
 
-        // Jellyfin SPA router events — listen for route changes
-        if (window.embyRouter) {
-            window.embyRouter.on('routechanged', onRouteChanged);
-        }
+        _intervals.push(setInterval(scan, SCAN_INTERVAL_MS));
+        _intervals.push(setInterval(function () {
+            if (window.location.href !== _lastUrl) {
+                _lastUrl = window.location.href;
+                setTimeout(scan, 600);
+            }
+        }, 1000));
 
-        if (window.AppEvents) {
-            window.AppEvents.on('viewstackchange', function (stack) {
-                // viewstack change typically means a page was pushed onto the nav stack
-                setTimeout(onRouteChanged, 500);
-            });
-        }
-
-        // Fallback: poll for URL changes
-        setInterval(function () {
-            if (window.location.href !== lastUrl) onRouteChanged();
-        }, 1500);
-
-        // Run immediately for current page
-        onRouteChanged();
-
-        console.log('[PlaybackIndicator] Initialized');
+        setTimeout(scan, 1200);
+        console.log('[PlaybackIndicator] v2.2 initialized');
     }
 
-    // Wait for Jellyfin to be fully loaded before initializing
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', function () {
-            setTimeout(init, 1000);
-        });
+        document.addEventListener('DOMContentLoaded', function () { setTimeout(init, 1500); });
     } else {
-        setTimeout(init, 1000);
+        setTimeout(init, 1500);
     }
 })();

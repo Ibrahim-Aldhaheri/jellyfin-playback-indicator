@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Playback Indicator Configuration</title>
+</head>
+<body>
+    <div id="PlaybackIndicatorConfigPage" data-role="page" class="page type-interior pluginConfigurationPage"
+         data-require="/web/Plugins/b6f3e2a1-d4c5-4e7a-8b3f-9e2d1c0a8b5e/configPage.js">
+        <div data-role="content">
+            <div class="content-primary">
+                <h2>Playback Indicator</h2>
+                <p>Shows direct-play / direct-stream / transcode badges on items.</p>
+                <form id="PlaybackIndicatorConfigForm">
+                    <div class="inputContainer">
+                        <label class="inputLabel" for="CacheTtlMinutes">Cache TTL (minutes)</label>
+                        <input type="number" id="CacheTtlMinutes" name="CacheTtlMinutes" min="1" max="1440" value="60" />
+                        <div class="fieldDescription">How long to cache playback info per item.</div>
+                    </div>
+                    <div class="checkboxContainer">
+                        <label class="emby-checkbox-label">
+                            <input type="checkbox" id="ShowBadgeOnMovies" />
+                            <span>Show badges on movies</span>
+                        </label>
+                    </div>
+                    <div class="checkboxContainer">
+                        <label class="emby-checkbox-label">
+                            <input type="checkbox" id="ShowBadgeOnEpisodes" />
+                            <span>Show badges on episodes</span>
+                        </label>
+                    </div>
+                    <br />
+                    <button type="submit" class="raised button-submit emby-button">Save</button>
+                </form>
+            </div>
+        </div>
+        <script>
+            (function() {
+                var pluginId = 'b6f3e2a1-d4c5-4e7a-8b3f-9e2d1c0a8b5e';
+                var form = document.getElementById('PlaybackIndicatorConfigForm');
+
+                function loadConfig() {
+                    ApiClient.getPluginConfiguration(pluginId).then(function(config) {
+                        document.getElementById('CacheTtlMinutes').value = config.CacheTtlMinutes || 60;
+                        document.getElementById('ShowBadgeOnMovies').checked = config.ShowBadgeOnMovies !== false;
+                        document.getElementById('ShowBadgeOnEpisodes').checked = config.ShowBadgeOnEpisodes !== false;
+                    });
+                }
+
+                form.addEventListener('submit', function(e) {
+                    e.preventDefault();
+                    ApiClient.getPluginConfiguration(pluginId).then(function(config) {
+                        config.CacheTtlMinutes = parseInt(document.getElementById('CacheTtlMinutes').value) || 60;
+                        config.ShowBadgeOnMovies = document.getElementById('ShowBadgeOnMovies').checked;
+                        config.ShowBadgeOnEpisodes = document.getElementById('ShowBadgeOnEpisodes').checked;
+                        ApiClient.updatePluginConfiguration(pluginId, config).then(function() {
+                            Dashboard.processPluginConfigurationUpdateResult(form);
+                        });
+                    });
+                });
+
+                loadConfig();
+            })();
+        </script>
+    </div>
+</body>
+</html>
