@@ -49,7 +49,14 @@ Settings are available in **Dashboard → Plugins → Playback Indicator**:
 | Status | Color | Meaning |
 |--------|-------|---------|
 | ✅ Direct Play | Green | Container, video codec, audio codec, subtitles all compatible — no transcoding |
-| ⚠️ Will Transcode | Amber | One or more streams will be transcoded |
+| ⚠️ Direct Stream | Amber | Video plays natively, but audio needs transcoding (remux) |
+| ❌ Transcode | Red | Video and/or audio needs full transcoding |
+
+### A note on Direct Stream detection
+
+Direct Stream detection proved too unreliable to distinguish cleanly from Transcode in many real-world cases — especially with MKV containers and unsupported audio codecs (DTS, TrueHD, etc.). Jellyfin's `SupportsDirectStream` flag can report true even when the result will effectively require transcoding on many devices (phones, TVs, browser players).
+
+Because of this, items that need audio transcoding inside MKV/AVI/OGV/FLV containers are reported as **Transcode** (❌) rather than Direct Stream. This is intentional — it is safer to warn users that transcoding will occur than to falsely promise a Direct Stream that may stutter or fail on their device.
 
 ## Tech Stack
 

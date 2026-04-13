@@ -25,6 +25,9 @@
     // MKV + unsupported audio often fails on phones/TVs
     const TRANSCODE_RISKY_CONTAINERS = new Set(['mkv', 'avi', 'ogv', 'flv']);
 
+    // Only show badges on actual playable media items
+    const PLAYABLE_TYPES = new Set(['Episode', 'Movie']);
+
     let _intervals = [];
     let _destroyed = false;
     let _lastUrl = '';
@@ -306,6 +309,59 @@
         return stream ? (stream.Codec || '').toLowerCase() : null;
     }
 
+    // ─── Item Type Check ─────────────────────────────────────────────────────
+
+    const _typeCache = {};
+
+    /**
+     * Fetch item type from Jellyfin API.
+     * Returns a Promise that resolves to the item's Type string (e.g. "Episode", "Movie", "Season").
+     */
+    function fetchItemType(itemId) {
+        if (_typeCache.hasOwnProperty(itemId)) {
+            return Promise.resolve(_typeCache[itemId]);
+        }
+        return new Promise(function (resolve, reject) {
+            const apiClient = getApiClient();
+            if (!apiClient) { reject(new Error('no ApiClient')); return; }
+
+            const userId = apiClient.getCurrentUserId ? apiClient.getCurrentUserId() : (apiClient._currentUser?.Id || '');
+            const serverAddr = apiClient._serverAddress || (apiClient.serverAddress ? apiClient.serverAddress() : '');
+            const url = serverAddr + '/Users/' + userId + '/Items/' + itemId;
+
+            const xhr = new XMLHttpRequest();
+            xhr.timeout = 5000;
+
+            xhr.onload = function () {
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    try {
+                        const data = JSON.parse(xhr.responseText);
+                        const type = data.Type || null;
+                        _typeCache[itemId] = type;
+                        resolve(type);
+                    } catch (_) { reject(new Error('parse error')); }
+                } else { reject(new Error('http ' + xhr.status)); }
+            };
+            xhr.onerror = function () { reject(new Error('network error')); };
+            xhr.ontimeout = function () { reject(new Error('timeout')); };
+
+            xhr.open('GET', url, true);
+
+            const token = apiClient.accessToken ? apiClient.accessToken() : '';
+            const deviceId = apiClient.deviceId ? apiClient.deviceId() : '';
+            const clientName = apiClient._clientName || 'Jellyfin Web';
+            const clientVersion = apiClient._clientVersion || '10.11.0';
+            const deviceName = apiClient._deviceName || 'Browser';
+
+            xhr.setRequestHeader('X-Emby-Authorization',
+                'MediaBrowser Client="' + clientName + '", Device="' + deviceName +
+                '", DeviceId="' + deviceId + '", Version="' + clientVersion +
+                '", Token="' + token + '"');
+
+            xhr.send();
+        });
+    }
+
     // ─── Badge DOM ───────────────────────────────────────────────────────────
 
     function injectStyles() {
@@ -469,12 +525,19 @@
             if (cached) {
                 placeBadge(el, itemId, cached.type, cached.reason);
             } else {
-                placeBadge(el, itemId, 'loading');
-                fetchPlaybackInfo(itemId).then(function (result) {
+                // First check if the item is a playable type (Episode/Movie)
+                // Don't show loading badge until we confirm it's playable
+                fetchItemType(itemId).then(function (type) {
                     if (_destroyed) return;
-                    removeBadges(el);
-                    placeBadge(el, itemId, result.type, result.reason);
-                    setCache(cacheKey, { type: result.type, reason: result.reason });
+                    if (!PLAYABLE_TYPES.has(type)) return; // Skip seasons, series, artists, etc.
+
+                    placeBadge(el, itemId, 'loading');
+                    return fetchPlaybackInfo(itemId).then(function (result) {
+                        if (_destroyed) return;
+                        removeBadges(el);
+                        placeBadge(el, itemId, result.type, result.reason);
+                        setCache(cacheKey, { type: result.type, reason: result.reason });
+                    });
                 }).catch(function () {
                     removeBadges(el);
                 });
