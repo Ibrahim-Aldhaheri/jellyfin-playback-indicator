@@ -1,0 +1,23 @@
+/* Playback Indicator — badge overrides */
+:root {
+    --jpi-green: #1a6b2a;
+    --jpi-amber: #7a5f00;
+    --jpi-red: #6b1a1a;
+    --jpi-grey: #333333;
+}
+
+/* Badge base — override any conflicting theme styles */
+.jpi-badge {
+    font-family: inherit !important;
+    cursor: default !important;
+}
+
+/* Spinner for loading state */
+.jpi-badge-loading .jpi-badge-icon {
+    animation: jpi-spin 1s linear infinite;
+}
+
+@keyframes jpi-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
