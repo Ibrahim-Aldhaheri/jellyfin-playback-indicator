@@ -9,6 +9,14 @@
         "versions": [
             {
                 "version": "0.2.0.0",
+                "changelog": "Fix JS injection: now loads globally on all Jellyfin pages via index.html modification, served from plugin controller endpoint",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://raw.githubusercontent.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/main/releases/jellyfin-plugin-playbackindicator-0.2.0.0.zip",
+                "checksum": "45d8519b44b066fb73b9193be55ecad7",
+                "timestamp": "2026-04-12T17:00:00Z"
+            },
+            {
+                "version": "0.2.0.0",
                 "changelog": "Device-specific cache keys fix cross-device wrong status, badge text alignment fix",
                 "targetAbi": "10.11.0.0",
                 "sourceUrl": "https://raw.githubusercontent.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/main/releases/jellyfin-plugin-playbackindicator-0.2.0.0.zip",
