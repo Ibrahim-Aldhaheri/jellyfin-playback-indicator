@@ -32,11 +32,37 @@
                     <br />
                     <button type="submit" class="raised button-submit emby-button">Save</button>
                 </form>
+
+                <h3 style="margin-top: 2em;">Cache Management</h3>
+                <button type="button" id="btnClearCache" class="raised emby-button" style="margin-bottom: 1em;">
+                    Clear All Cache
+                </button>
+
+                <details id="cacheViewerSection" style="margin-top: 1em;">
+                    <summary style="cursor: pointer; font-weight: 600; margin-bottom: 0.5em;">Device Cache</summary>
+                    <div style="overflow-x: auto;">
+                        <table id="cacheTable" style="width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 0.5em;">
+                            <thead>
+                                <tr style="border-bottom: 1px solid rgba(255,255,255,0.1); text-align: left;">
+                                    <th style="padding: 6px 8px;">Item ID</th>
+                                    <th style="padding: 6px 8px;">Device ID</th>
+                                    <th style="padding: 6px 8px;">Badge</th>
+                                    <th style="padding: 6px 8px;">Reason</th>
+                                    <th style="padding: 6px 8px;">Expires</th>
+                                    <th style="padding: 6px 4px;"></th>
+                                </tr>
+                            </thead>
+                            <tbody id="cacheTableBody"></tbody>
+                        </table>
+                        <p id="cacheEmptyMsg" style="color: #888; font-size: 13px; display: none;">No cached entries.</p>
+                    </div>
+                </details>
             </div>
         </div>
         <script>
             (function() {
                 var pluginId = 'b6f3e2a1-d4c5-4e7a-8b3f-9e2d1c0a8b5e';
+                var CACHE_PREFIX = 'jpi_v2_';
                 var form = document.getElementById('PlaybackIndicatorConfigForm');
 
                 function loadConfig() {
@@ -59,7 +85,80 @@
                     });
                 });
 
+                // ─── Clear All Cache ─────────────────────────────────────
+                document.getElementById('btnClearCache').addEventListener('click', function() {
+                    if (!confirm('Clear all Playback Indicator cache entries?')) return;
+                    var keys = Object.keys(localStorage).filter(function(k) { return k.startsWith(CACHE_PREFIX); });
+                    keys.forEach(function(k) { localStorage.removeItem(k); });
+                    refreshCacheTable();
+                    Dashboard.alert('Cleared ' + keys.length + ' cache entries.');
+                });
+
+                // ─── Cache Viewer Table ──────────────────────────────────
+                function truncate(str, len) {
+                    return str.length > len ? str.substring(0, len) + '…' : str;
+                }
+
+                function badgeLabel(type) {
+                    if (type === 'direct') return '✅ Direct';
+                    if (type === 'stream') return '⚠️ Stream';
+                    if (type === 'transcode') return '❌ Transcode';
+                    return type || '?';
+                }
+
+                function refreshCacheTable() {
+                    var tbody = document.getElementById('cacheTableBody');
+                    var emptyMsg = document.getElementById('cacheEmptyMsg');
+                    tbody.innerHTML = '';
+
+                    var keys = Object.keys(localStorage).filter(function(k) { return k.startsWith(CACHE_PREFIX); });
+
+                    if (keys.length === 0) {
+                        emptyMsg.style.display = 'block';
+                        return;
+                    }
+                    emptyMsg.style.display = 'none';
+
+                    keys.forEach(function(fullKey) {
+                        try {
+                            var entry = JSON.parse(localStorage.getItem(fullKey));
+                            var suffix = fullKey.substring(CACHE_PREFIX.length);
+                            var parts = suffix.split('_');
+                            var itemId = parts[0] || '';
+                            var deviceId = parts[1] || '';
+                            var data = entry.data || {};
+                            var expires = entry.expires ? new Date(entry.expires).toLocaleString() : '?';
+
+                            var tr = document.createElement('tr');
+                            tr.style.borderBottom = '1px solid rgba(255,255,255,0.05)';
+                            tr.innerHTML =
+                                '<td style="padding:4px 8px;font-family:monospace;">' + truncate(itemId, 12) + '</td>' +
+                                '<td style="padding:4px 8px;font-family:monospace;">' + truncate(deviceId, 12) + '</td>' +
+                                '<td style="padding:4px 8px;">' + badgeLabel(data.type) + '</td>' +
+                                '<td style="padding:4px 8px;color:#aaa;">' + (data.reason || '—') + '</td>' +
+                                '<td style="padding:4px 8px;color:#888;font-size:12px;">' + expires + '</td>' +
+                                '<td style="padding:4px 4px;"></td>';
+                            var delBtn = document.createElement('button');
+                            delBtn.textContent = '✕';
+                            delBtn.title = 'Remove this entry';
+                            delBtn.style.cssText = 'background:none;border:none;color:#e55;cursor:pointer;font-size:14px;padding:2px 6px;';
+                            delBtn.addEventListener('click', function() {
+                                localStorage.removeItem(fullKey);
+                                refreshCacheTable();
+                            });
+                            tr.lastChild.appendChild(delBtn);
+                            tbody.appendChild(tr);
+                        } catch (_) {}
+                    });
+                }
+
+                // Refresh table when the details section is opened
+                document.getElementById('cacheViewerSection').addEventListener('toggle', function() {
+                    if (this.open) refreshCacheTable();
+                });
+
                 loadConfig();
+                refreshCacheTable();
             })();
         </script>
     </div>

@@ -1,5 +1,5 @@
 /**
- * Jellyfin Playback Indicator v2.2
+ * Jellyfin Playback Indicator v0.3.0
  * Shows Direct Play / Direct Stream / Transcode badges on items.
  * Uses Jellyfin's REAL PlaybackInfo API with the actual device profile.
  *
@@ -309,18 +309,63 @@
         return stream ? (stream.Codec || '').toLowerCase() : null;
     }
 
-    // ─── Item Type Check ─────────────────────────────────────────────────────
+    // ─── Item Type Inference ────────────────────────────────────────────────
 
     const _typeCache = {};
 
     /**
-     * Fetch item type from Jellyfin API.
-     * Returns a Promise that resolves to the item's Type string (e.g. "Episode", "Movie", "Season").
+     * Infer item type from page context (URL, page title, DOM) to avoid
+     * per-item API calls. Falls back to API only if context is ambiguous.
+     */
+    function inferItemTypeFromContext() {
+        const path = window.location.hash || window.location.pathname || '';
+        const lower = path.toLowerCase();
+
+        // Series detail page or season page -> items are Episodes
+        if (/[#/]details\?.*id=.*&serverId=/.test(path)) {
+            // On a detail page — check if it's a series/season by looking at DOM
+            var pageTitle = document.querySelector('.itemName, h1, h2, [class*="itemName"]');
+            var seasonSelector = document.querySelector('.seasons, [class*="season"], .episodeList, [class*="episode"]');
+            if (seasonSelector) return 'Episode';
+        }
+        if (/[#/]list\?.*type=episode/i.test(path)) return 'Episode';
+        if (/[#/]list\?.*type=movie/i.test(path)) return 'Movie';
+
+        // Movie library pages — check the page heading or section context
+        var sectionHeaders = document.querySelectorAll('.sectionTitle, [class*="sectionTitle"], .pageTitle, h1');
+        for (var i = 0; i < sectionHeaders.length; i++) {
+            var text = (sectionHeaders[i].textContent || '').toLowerCase();
+            if (/\bmovies?\b/.test(text)) return 'Movie';
+            if (/\bepisodes?\b/.test(text) || /\bseason\b/.test(text)) return 'Episode';
+        }
+
+        // Check library type from view settings or page params
+        if (/parentid=/i.test(lower)) {
+            // On a library page — check if items have episode-like structure
+            var episodeRows = document.querySelectorAll('[class*="episode"], .listItem .listItemBody [class*="parentName"]');
+            if (episodeRows.length > 0) return 'Episode';
+        }
+
+        return null; // ambiguous — need API fallback
+    }
+
+    /**
+     * Get item type, preferring context inference over API calls.
+     * Returns a Promise that resolves to the item's Type string.
      */
     function fetchItemType(itemId) {
         if (_typeCache.hasOwnProperty(itemId)) {
             return Promise.resolve(_typeCache[itemId]);
         }
+
+        // Try to infer from page context first (zero API calls)
+        var inferred = inferItemTypeFromContext();
+        if (inferred) {
+            _typeCache[itemId] = inferred;
+            return Promise.resolve(inferred);
+        }
+
+        // Fallback: API call for ambiguous contexts
         return new Promise(function (resolve, reject) {
             const apiClient = getApiClient();
             if (!apiClient) { reject(new Error('no ApiClient')); return; }
@@ -597,12 +642,14 @@
         _intervals.push(setInterval(function () {
             if (window.location.href !== _lastUrl) {
                 _lastUrl = window.location.href;
+                // Clear inferred type cache on page change so new context is evaluated
+                Object.keys(_typeCache).forEach(function (k) { delete _typeCache[k]; });
                 setTimeout(scan, 600);
             }
         }, 1000));
 
         setTimeout(scan, 1200);
-        console.log('[PlaybackIndicator] v2.2 initialized');
+        console.log('[PlaybackIndicator] v0.3.0 initialized');
     }
 
     if (document.readyState === 'loading') {
