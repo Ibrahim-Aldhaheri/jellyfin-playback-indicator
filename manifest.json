@@ -12,8 +12,8 @@
                 "targetAbi": "10.11.0.0",
                 "version": "0.3.0.0",
                 "sourceUrl": "https://github.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/releases/download/0.3.0/jellyfin-plugin-playbackindicator-0.3.0.0.zip",
-                "checksum": "24d9b8696e29f327760d3fb0c2242b70",
-                "timestamp": "2026-04-14T12:50:00Z"
+                "checksum": "cfb554a5d3aa90a760addbfa432f8e4c",
+                "timestamp": "2026-04-14T12:56:00Z"
             },
             {
                 "changelog": "Fix JS injection: now loads globally on all Jellyfin pages via index.html modification + controller endpoint",
