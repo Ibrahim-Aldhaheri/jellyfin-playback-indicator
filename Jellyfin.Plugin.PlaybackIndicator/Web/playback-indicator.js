@@ -5,8 +5,8 @@
  *
  * States:
  *  ✅ Direct Play   — container + video + audio all native
- *  ⚠️ Direct Stream — container + video supported, audio transcode (remux)
- *  ❌ Transcode     — video needs transcode (or mkv + unsupported audio = risky)
+ *  ⚠️ Direct Stream — container remuxed, video direct, audio may remux
+ *  ❌ Transcode     — video or audio needs full transcode
  */
 (function () {
     'use strict';
@@ -22,9 +22,6 @@
         loading:   { cls: 'jpi-loading',   icon: '⏳', label: 'Checking...' }
     };
 
-    // MKV + unsupported audio often fails on phones/TVs
-    const TRANSCODE_RISKY_CONTAINERS = new Set(['mkv', 'avi', 'ogv', 'flv']);
-
     // Only show badges on actual playable media items
     const PLAYABLE_TYPES = new Set(['Episode', 'Movie']);
 
@@ -32,6 +29,7 @@
     let _destroyed = false;
     let _lastUrl = '';
     let _codecFingerprint = null;
+    const _processing = new Set();
 
     // ─── Cleanup (uninstall safe) ────────────────────────────────────────────
 
@@ -274,23 +272,12 @@
         }
 
         // DirectStream = container remuxed, video copied, audio may transcode
+        // Trust Jellyfin's response — if the server says DirectStream works, show it
         if (src.SupportsDirectStream) {
             const audioCodec = getStreamCodec(src, 'Audio');
-
-            // MKV + unsupported audio is unreliable on phones/TVs
-            if (TRANSCODE_RISKY_CONTAINERS.has(container) && !src.SupportsDirectPlay) {
-                // If it only supports DirectStream (not DirectPlay) for MKV,
-                // it means audio needs transcode — mark as risky transcode
-                return {
-                    type: 'transcode',
-                    reason: container.toUpperCase() + ' + ' + (audioCodec || '?') + ' audio — may fail on this device',
-                    container
-                };
-            }
-
             return {
                 type: 'stream',
-                reason: 'video direct, audio transcode (' + (audioCodec || '?') + ')',
+                reason: 'video direct, audio may remux (' + (audioCodec || '?') + ')',
                 container
             };
         }
@@ -569,12 +556,17 @@
 
             if (cached) {
                 placeBadge(el, itemId, cached.type, cached.reason);
-            } else {
-                // First check if the item is a playable type (Episode/Movie)
-                // Don't show loading badge until we confirm it's playable
+            } else if (!_processing.has(itemId)) {
+                // Mark as in-flight so concurrent scans don't duplicate work
+                _processing.add(itemId);
+
+                // First confirm the item is a playable type before showing any badge
                 fetchItemType(itemId).then(function (type) {
                     if (_destroyed) return;
-                    if (!PLAYABLE_TYPES.has(type)) return; // Skip seasons, series, artists, etc.
+                    if (!PLAYABLE_TYPES.has(type)) {
+                        _processing.delete(itemId);
+                        return; // Skip seasons, series, artists, etc.
+                    }
 
                     placeBadge(el, itemId, 'loading');
                     return fetchPlaybackInfo(itemId).then(function (result) {
@@ -582,9 +574,11 @@
                         removeBadges(el);
                         placeBadge(el, itemId, result.type, result.reason);
                         setCache(cacheKey, { type: result.type, reason: result.reason });
+                        _processing.delete(itemId);
                     });
                 }).catch(function () {
                     removeBadges(el);
+                    _processing.delete(itemId);
                 });
             }
         });

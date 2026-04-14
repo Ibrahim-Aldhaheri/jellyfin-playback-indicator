@@ -5,171 +5,243 @@
     <title>Playback Indicator Configuration</title>
 </head>
 <body>
-    <div id="PlaybackIndicatorConfigPage" data-role="page" class="page type-interior pluginConfigurationPage"
-         data-require="/web/Plugins/b6f3e2a1-d4c5-4e7a-8b3f-9e2d1c0a8b5e/configPage.js">
-        <div data-role="content">
-            <div class="content-primary">
-                <h2>Playback Indicator</h2>
-                <p>Shows direct-play / direct-stream / transcode badges on items.</p>
-                <form id="PlaybackIndicatorConfigForm">
-                    <div class="inputContainer">
-                        <label class="inputLabel" for="CacheTtlMinutes">Cache TTL (minutes)</label>
-                        <input type="number" id="CacheTtlMinutes" name="CacheTtlMinutes" min="1" max="1440" value="60" />
-                        <div class="fieldDescription">How long to cache playback info per item.</div>
-                    </div>
-                    <div class="checkboxContainer">
-                        <label class="emby-checkbox-label">
-                            <input type="checkbox" id="ShowBadgeOnMovies" />
-                            <span>Show badges on movies</span>
-                        </label>
-                    </div>
-                    <div class="checkboxContainer">
-                        <label class="emby-checkbox-label">
-                            <input type="checkbox" id="ShowBadgeOnEpisodes" />
-                            <span>Show badges on episodes</span>
-                        </label>
-                    </div>
-                    <br />
-                    <button type="submit" class="raised button-submit emby-button">Save</button>
-                </form>
+    <div id="PlaybackIndicatorConfigPage" class="mainAnimatedPage type-interior">
+        <div class="content-primary">
+            <h2>Playback Indicator</h2>
+            <p>Shows direct-play / direct-stream / transcode badges on items.</p>
+            <form id="PlaybackIndicatorConfigForm">
+                <div class="inputContainer">
+                    <label class="inputLabel" for="CacheTtlMinutes">Cache TTL (minutes)</label>
+                    <input type="number" id="CacheTtlMinutes" name="CacheTtlMinutes" min="1" max="1440" value="60"
+                           class="emby-input" />
+                    <div class="fieldDescription">How long to cache playback info per item.</div>
+                </div>
+                <div class="checkboxContainer">
+                    <label class="emby-checkbox-label">
+                        <input type="checkbox" id="ShowBadgeOnMovies" class="emby-checkbox" />
+                        <span>Show badges on movies</span>
+                    </label>
+                </div>
+                <div class="checkboxContainer">
+                    <label class="emby-checkbox-label">
+                        <input type="checkbox" id="ShowBadgeOnEpisodes" class="emby-checkbox" />
+                        <span>Show badges on episodes</span>
+                    </label>
+                </div>
+                <br />
+                <button type="submit" class="raised button-submit emby-button">Save</button>
+            </form>
 
-                <h3 style="margin-top: 2em;">Cache Management</h3>
-                <button type="button" id="btnClearCache" class="raised emby-button" style="margin-bottom: 1em;">
-                    Clear All Cache
-                </button>
+            <h3 style="margin-top: 2em;">Cache Management</h3>
+            <button type="button" id="btnClearCache" class="raised emby-button" style="margin-bottom: 1em;">
+                Clear All Cache
+            </button>
 
-                <details id="cacheViewerSection" style="margin-top: 1em;">
-                    <summary style="cursor: pointer; font-weight: 600; margin-bottom: 0.5em;">Device Cache</summary>
-                    <div style="overflow-x: auto;">
-                        <table id="cacheTable" style="width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 0.5em;">
-                            <thead>
-                                <tr style="border-bottom: 1px solid rgba(255,255,255,0.1); text-align: left;">
-                                    <th style="padding: 6px 8px;">Item ID</th>
-                                    <th style="padding: 6px 8px;">Device ID</th>
-                                    <th style="padding: 6px 8px;">Badge</th>
-                                    <th style="padding: 6px 8px;">Reason</th>
-                                    <th style="padding: 6px 8px;">Expires</th>
-                                    <th style="padding: 6px 4px;"></th>
-                                </tr>
-                            </thead>
-                            <tbody id="cacheTableBody"></tbody>
-                        </table>
-                        <p id="cacheEmptyMsg" style="color: #888; font-size: 13px; display: none;">No cached entries.</p>
-                    </div>
-                </details>
+            <details id="cacheViewerSection" style="margin-top: 1em;">
+                <summary style="cursor: pointer; font-weight: 600; margin-bottom: 0.5em;">Device Cache</summary>
+                <div style="overflow-x: auto;">
+                    <table id="cacheTable" style="width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 0.5em;">
+                        <thead>
+                            <tr style="border-bottom: 1px solid rgba(255,255,255,0.1); text-align: left;">
+                                <th style="padding: 6px 8px;">Item ID</th>
+                                <th style="padding: 6px 8px;">Device ID</th>
+                                <th style="padding: 6px 8px;">Badge</th>
+                                <th style="padding: 6px 8px;">Reason</th>
+                                <th style="padding: 6px 8px;">Expires</th>
+                                <th style="padding: 6px 4px;"></th>
+                            </tr>
+                        </thead>
+                        <tbody id="cacheTableBody"></tbody>
+                    </table>
+                    <p id="cacheEmptyMsg" style="color: #888; font-size: 13px; display: none;">No cached entries.</p>
+                </div>
+            </details>
+
+            <div id="jpi-toast" style="display:none; position:fixed; bottom:20px; left:50%; transform:translateX(-50%);
+                 background:#333; color:#fff; padding:10px 20px; border-radius:6px; font-size:14px; z-index:9999;
+                 box-shadow:0 2px 8px rgba(0,0,0,0.4); transition:opacity 0.3s;">
             </div>
         </div>
-        <script>
-            (function() {
-                var pluginId = 'b6f3e2a1-d4c5-4e7a-8b3f-9e2d1c0a8b5e';
-                var CACHE_PREFIX = 'jpi_v2_';
-                var form = document.getElementById('PlaybackIndicatorConfigForm');
-
-                function loadConfig() {
-                    ApiClient.getPluginConfiguration(pluginId).then(function(config) {
-                        document.getElementById('CacheTtlMinutes').value = config.CacheTtlMinutes || 60;
-                        document.getElementById('ShowBadgeOnMovies').checked = config.ShowBadgeOnMovies !== false;
-                        document.getElementById('ShowBadgeOnEpisodes').checked = config.ShowBadgeOnEpisodes !== false;
-                    });
-                }
-
-                form.addEventListener('submit', function(e) {
-                    e.preventDefault();
-                    ApiClient.getPluginConfiguration(pluginId).then(function(config) {
-                        config.CacheTtlMinutes = parseInt(document.getElementById('CacheTtlMinutes').value) || 60;
-                        config.ShowBadgeOnMovies = document.getElementById('ShowBadgeOnMovies').checked;
-                        config.ShowBadgeOnEpisodes = document.getElementById('ShowBadgeOnEpisodes').checked;
-                        ApiClient.updatePluginConfiguration(pluginId, config).then(function() {
-                            Dashboard.processPluginConfigurationUpdateResult(form);
-                        });
-                    });
-                });
-
-                // ─── Clear All Cache ─────────────────────────────────────
-                document.getElementById('btnClearCache').addEventListener('click', function() {
-                    if (!confirm('Clear all Playback Indicator cache entries?')) return;
-                    var keys = Object.keys(localStorage).filter(function(k) { return k.startsWith(CACHE_PREFIX); });
-                    keys.forEach(function(k) { localStorage.removeItem(k); });
-                    refreshCacheTable();
-                    Dashboard.alert('Cleared ' + keys.length + ' cache entries.');
-                });
-
-                // ─── Cache Viewer Table ──────────────────────────────────
-                function truncate(str, len) {
-                    return str.length > len ? str.substring(0, len) + '…' : str;
-                }
-
-                function badgeLabel(type) {
-                    if (type === 'direct') return '✅ Direct';
-                    if (type === 'stream') return '⚠️ Stream';
-                    if (type === 'transcode') return '❌ Transcode';
-                    return type || '?';
-                }
-
-                function refreshCacheTable() {
-                    var tbody = document.getElementById('cacheTableBody');
-                    var emptyMsg = document.getElementById('cacheEmptyMsg');
-                    tbody.innerHTML = '';
-
-                    var keys = Object.keys(localStorage).filter(function(k) { return k.startsWith(CACHE_PREFIX); });
-
-                    if (keys.length === 0) {
-                        emptyMsg.style.display = 'block';
-                        return;
-                    }
-                    emptyMsg.style.display = 'none';
-
-                    keys.forEach(function(fullKey) {
-                        try {
-                            var entry = JSON.parse(localStorage.getItem(fullKey));
-                            var suffix = fullKey.substring(CACHE_PREFIX.length);
-                            var parts = suffix.split('_');
-                            var itemId = parts[0] || '';
-                            var deviceId = parts[1] || '';
-                            var data = entry.data || {};
-                            var expires = entry.expires ? new Date(entry.expires).toLocaleString() : '?';
-
-                            var tr = document.createElement('tr');
-                            tr.style.borderBottom = '1px solid rgba(255,255,255,0.05)';
-
-                            function addCell(text, style) {
-                                var td = document.createElement('td');
-                                td.style.cssText = style;
-                                td.textContent = text;
-                                tr.appendChild(td);
-                                return td;
-                            }
-
-                            addCell(truncate(itemId, 12), 'padding:4px 8px;font-family:monospace;');
-                            addCell(truncate(deviceId, 12), 'padding:4px 8px;font-family:monospace;');
-                            addCell(badgeLabel(data.type), 'padding:4px 8px;');
-                            addCell(data.reason || '\u2014', 'padding:4px 8px;color:#aaa;');
-                            addCell(expires, 'padding:4px 8px;color:#888;font-size:12px;');
-                            var actionCell = addCell('', 'padding:4px 4px;');
-
-                            var delBtn = document.createElement('button');
-                            delBtn.textContent = '\u2715';
-                            delBtn.title = 'Remove this entry';
-                            delBtn.style.cssText = 'background:none;border:none;color:#e55;cursor:pointer;font-size:14px;padding:2px 6px;';
-                            delBtn.addEventListener('click', function() {
-                                localStorage.removeItem(fullKey);
-                                refreshCacheTable();
-                            });
-                            actionCell.appendChild(delBtn);
-                            tbody.appendChild(tr);
-                        } catch (_) {}
-                    });
-                }
-
-                // Refresh table when the details section is opened
-                document.getElementById('cacheViewerSection').addEventListener('toggle', function() {
-                    if (this.open) refreshCacheTable();
-                });
-
-                loadConfig();
-                refreshCacheTable();
-            })();
-        </script>
     </div>
+    <script>
+        (function() {
+            var pluginId = 'b6f3e2a1-d4c5-4e7a-8b3f-9e2d1c0a8b5e';
+            var CACHE_PREFIX = 'jpi_v2_';
+            var form = document.getElementById('PlaybackIndicatorConfigForm');
+
+            // ─── API helpers (ApiClient with fetch fallback) ────────
+            function getServerUrl() {
+                if (window.ApiClient) {
+                    if (typeof window.ApiClient.serverAddress === 'function') return window.ApiClient.serverAddress();
+                    if (window.ApiClient._serverAddress) return window.ApiClient._serverAddress;
+                }
+                return window.location.origin;
+            }
+
+            function getAuthHeaders() {
+                var headers = { 'Content-Type': 'application/json' };
+                if (window.ApiClient) {
+                    var token = typeof window.ApiClient.accessToken === 'function'
+                        ? window.ApiClient.accessToken() : (window.ApiClient._accessToken || '');
+                    if (token) {
+                        headers['X-Emby-Authorization'] =
+                            'MediaBrowser Token="' + token + '"';
+                    }
+                }
+                return headers;
+            }
+
+            function getPluginConfig() {
+                // Try ApiClient first
+                if (window.ApiClient && typeof window.ApiClient.getPluginConfiguration === 'function') {
+                    return window.ApiClient.getPluginConfiguration(pluginId);
+                }
+                // Fallback to fetch
+                return fetch(getServerUrl() + '/Plugins/' + pluginId + '/Configuration', {
+                    headers: getAuthHeaders()
+                }).then(function(r) { return r.json(); });
+            }
+
+            function updatePluginConfig(config) {
+                // Try ApiClient first
+                if (window.ApiClient && typeof window.ApiClient.updatePluginConfiguration === 'function') {
+                    return window.ApiClient.updatePluginConfiguration(pluginId, config);
+                }
+                // Fallback to fetch
+                return fetch(getServerUrl() + '/Plugins/' + pluginId + '/Configuration', {
+                    method: 'POST',
+                    headers: getAuthHeaders(),
+                    body: JSON.stringify(config)
+                });
+            }
+
+            function showToast(msg) {
+                // Try Dashboard.alert if available (older Jellyfin)
+                if (window.Dashboard && typeof window.Dashboard.alert === 'function') {
+                    try { window.Dashboard.alert(msg); return; } catch (_) {}
+                }
+                // Fallback toast notification
+                var toast = document.getElementById('jpi-toast');
+                toast.textContent = msg;
+                toast.style.display = 'block';
+                toast.style.opacity = '1';
+                setTimeout(function() {
+                    toast.style.opacity = '0';
+                    setTimeout(function() { toast.style.display = 'none'; }, 300);
+                }, 2500);
+            }
+
+            // ─── Load config ────────────────────────────────────────
+            function loadConfig() {
+                getPluginConfig().then(function(config) {
+                    document.getElementById('CacheTtlMinutes').value = config.CacheTtlMinutes || 60;
+                    document.getElementById('ShowBadgeOnMovies').checked = config.ShowBadgeOnMovies !== false;
+                    document.getElementById('ShowBadgeOnEpisodes').checked = config.ShowBadgeOnEpisodes !== false;
+                }).catch(function(err) {
+                    console.error('[PlaybackIndicator] Failed to load config:', err);
+                });
+            }
+
+            // ─── Save config ────────────────────────────────────────
+            form.addEventListener('submit', function(e) {
+                e.preventDefault();
+                getPluginConfig().then(function(config) {
+                    config.CacheTtlMinutes = parseInt(document.getElementById('CacheTtlMinutes').value) || 60;
+                    config.ShowBadgeOnMovies = document.getElementById('ShowBadgeOnMovies').checked;
+                    config.ShowBadgeOnEpisodes = document.getElementById('ShowBadgeOnEpisodes').checked;
+                    return updatePluginConfig(config);
+                }).then(function() {
+                    showToast('Settings saved.');
+                }).catch(function(err) {
+                    console.error('[PlaybackIndicator] Failed to save config:', err);
+                    showToast('Error saving settings.');
+                });
+            });
+
+            // ─── Clear All Cache ─────────────────────────────────────
+            document.getElementById('btnClearCache').addEventListener('click', function() {
+                if (!confirm('Clear all Playback Indicator cache entries?')) return;
+                var keys = Object.keys(localStorage).filter(function(k) { return k.startsWith(CACHE_PREFIX); });
+                keys.forEach(function(k) { localStorage.removeItem(k); });
+                refreshCacheTable();
+                showToast('Cleared ' + keys.length + ' cache entries.');
+            });
+
+            // ─── Cache Viewer Table ──────────────────────────────────
+            function truncate(str, len) {
+                return str.length > len ? str.substring(0, len) + '\u2026' : str;
+            }
+
+            function badgeLabel(type) {
+                if (type === 'direct') return '\u2705 Direct';
+                if (type === 'stream') return '\u26a0\ufe0f Stream';
+                if (type === 'transcode') return '\u274c Transcode';
+                return type || '?';
+            }
+
+            function refreshCacheTable() {
+                var tbody = document.getElementById('cacheTableBody');
+                var emptyMsg = document.getElementById('cacheEmptyMsg');
+                tbody.textContent = '';
+
+                var keys = Object.keys(localStorage).filter(function(k) { return k.startsWith(CACHE_PREFIX); });
+
+                if (keys.length === 0) {
+                    emptyMsg.style.display = 'block';
+                    return;
+                }
+                emptyMsg.style.display = 'none';
+
+                keys.forEach(function(fullKey) {
+                    try {
+                        var entry = JSON.parse(localStorage.getItem(fullKey));
+                        var suffix = fullKey.substring(CACHE_PREFIX.length);
+                        var parts = suffix.split('_');
+                        var itemId = parts[0] || '';
+                        var deviceId = parts[1] || '';
+                        var data = entry.data || {};
+                        var expires = entry.expires ? new Date(entry.expires).toLocaleString() : '?';
+
+                        var tr = document.createElement('tr');
+                        tr.style.borderBottom = '1px solid rgba(255,255,255,0.05)';
+
+                        function addCell(text, style) {
+                            var td = document.createElement('td');
+                            td.style.cssText = style;
+                            td.textContent = text;
+                            tr.appendChild(td);
+                            return td;
+                        }
+
+                        addCell(truncate(itemId, 12), 'padding:4px 8px;font-family:monospace;');
+                        addCell(truncate(deviceId, 12), 'padding:4px 8px;font-family:monospace;');
+                        addCell(badgeLabel(data.type), 'padding:4px 8px;');
+                        addCell(data.reason || '\u2014', 'padding:4px 8px;color:#aaa;');
+                        addCell(expires, 'padding:4px 8px;color:#888;font-size:12px;');
+                        var actionCell = addCell('', 'padding:4px 4px;');
+
+                        var delBtn = document.createElement('button');
+                        delBtn.textContent = '\u2715';
+                        delBtn.title = 'Remove this entry';
+                        delBtn.style.cssText = 'background:none;border:none;color:#e55;cursor:pointer;font-size:14px;padding:2px 6px;';
+                        delBtn.addEventListener('click', function() {
+                            localStorage.removeItem(fullKey);
+                            refreshCacheTable();
+                        });
+                        actionCell.appendChild(delBtn);
+                        tbody.appendChild(tr);
+                    } catch (_) {}
+                });
+            }
+
+            // Refresh table when the details section is opened
+            document.getElementById('cacheViewerSection').addEventListener('toggle', function() {
+                if (this.open) refreshCacheTable();
+            });
+
+            loadConfig();
+            refreshCacheTable();
+        })();
+    </script>
 </body>
 </html>
