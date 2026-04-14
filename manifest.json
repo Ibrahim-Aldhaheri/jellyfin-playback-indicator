@@ -6,6 +6,7 @@
         "description": "A Jellyfin plugin that automatically calculates whether each episode or movie can direct-play on your current device, and shows a colored badge in the web UI. Badges are calculated using your device's actual playback profile — no manual configuration required.",
         "owner": "Ibrahim-Aldhaheri",
         "category": "General",
+        "imageUrl": "",
         "versions": [
             {
                 "changelog": "v0.3.0: Fix plugin loading — strip framework DLLs from package, correct manifest metadata, add config page with cache management",

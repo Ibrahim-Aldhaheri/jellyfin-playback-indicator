@@ -30,6 +30,7 @@
     let _lastUrl = '';
     let _codecFingerprint = null;
     const _processing = new Set();
+    const _skippedItems = new Set();
 
     // ─── Cleanup (uninstall safe) ────────────────────────────────────────────
 
@@ -107,97 +108,9 @@
     }
 
     /**
-     * Get the device profile for the CURRENT device/browser.
-     * Jellyfin's web client builds this internally — we access it via the
-     * playback capabilities detection. Falls back to a basic browser profile.
-     */
-    function getDeviceProfile() {
-        // Method 1: Jellyfin's internal profile builder
-        // The web client stores capabilities in the connection manager
-        if (window.ConnectionManager) {
-            try {
-                const apiClient = window.ConnectionManager.getApiClient(
-                    window.ConnectionManager._servers?.[0]?.id
-                );
-                if (apiClient?._deviceProfile) return apiClient._deviceProfile;
-            } catch (_) { }
-        }
-
-        // Method 2: Build from what the browser actually supports
-        // Using HTML5 video element capability detection
-        try {
-            const video = document.createElement('video');
-            const canPlay = (type) => { try { return video.canPlayType(type); } catch (_) { return ''; } };
-
-            const supportsH264 = canPlay('video/mp4; codecs="avc1.42E01E"') !== '';
-            const supportsHevc = canPlay('video/mp4; codecs="hvc1"') !== '' || canPlay('video/mp4; codecs="hev1"') !== '';
-            const supportsVP9 = canPlay('video/webm; codecs="vp9"') !== '';
-            const supportsAV1 = canPlay('video/mp4; codecs="av01.0.01M.08"') !== '';
-
-            const supportsAAC = canPlay('audio/mp4; codecs="mp4a.40.2"') !== '';
-            const supportsOpus = canPlay('audio/webm; codecs="opus"') !== '';
-            const supportsMP3 = canPlay('audio/mpeg') !== '';
-            const supportsFLAC = canPlay('audio/flac') !== '';
-            const supportsAC3 = canPlay('audio/mp4; codecs="ac-3"') !== '' || canPlay('audio/ac3') !== '';
-            const supportsDTS = canPlay('audio/mp4; codecs="mp4a.a6"') !== '' || canPlay('audio/mp4; codecs="dtsc"') !== '';
-
-            // Build a DirectPlayProfile for this browser
-            const videoCodecs = [];
-            if (supportsH264) videoCodecs.push('h264');
-            if (supportsHevc) videoCodecs.push('hevc', 'h265');
-            if (supportsVP9) videoCodecs.push('vp9');
-            if (supportsAV1) videoCodecs.push('av1');
-
-            const audioCodecs = [];
-            if (supportsAAC) audioCodecs.push('aac');
-            if (supportsOpus) audioCodecs.push('opus');
-            if (supportsMP3) audioCodecs.push('mp3');
-            if (supportsFLAC) audioCodecs.push('flac');
-            if (supportsAC3) audioCodecs.push('ac3', 'eac3');
-            if (supportsDTS) audioCodecs.push('dts', 'dca');
-
-            return {
-                Name: 'PlaybackIndicator Detected',
-                MaxStreamingBitrate: 120000000,
-                MaxStaticBitrate: 120000000,
-                DirectPlayProfiles: [
-                    {
-                        Container: 'mp4,m4v,mov',
-                        AudioCodec: audioCodecs.join(','),
-                        VideoCodec: videoCodecs.join(','),
-                        Type: 'Video'
-                    },
-                    {
-                        Container: 'mkv,webm',
-                        AudioCodec: audioCodecs.join(','),
-                        VideoCodec: videoCodecs.join(','),
-                        Type: 'Video'
-                    },
-                    {
-                        Container: 'ts,mpegts',
-                        AudioCodec: audioCodecs.join(','),
-                        VideoCodec: videoCodecs.join(','),
-                        Type: 'Video'
-                    }
-                ],
-                TranscodingProfiles: [
-                    {
-                        Container: 'ts',
-                        Type: 'Video',
-                        VideoCodec: 'h264',
-                        AudioCodec: 'aac,mp3',
-                        Context: 'Streaming',
-                        Protocol: 'hls'
-                    }
-                ]
-            };
-        } catch (_) {
-            return null;
-        }
-    }
-
-    /**
-     * Call Jellyfin's POST /Items/{id}/PlaybackInfo with the REAL device profile.
+     * Call Jellyfin's POST /Items/{id}/PlaybackInfo WITHOUT a DeviceProfile.
+     * Without a profile, Jellyfin returns raw MediaSource info. We then
+     * check the codecs against the browser's actual canPlayType() support.
      */
     function fetchPlaybackInfo(itemId) {
         return new Promise(function (resolve, reject) {
@@ -205,11 +118,9 @@
             if (!apiClient) { reject(new Error('no ApiClient')); return; }
 
             const userId = apiClient.getCurrentUserId ? apiClient.getCurrentUserId() : (apiClient._currentUser?.Id || '');
-            const deviceProfile = getDeviceProfile();
 
             const body = {
                 UserId: userId,
-                DeviceProfile: deviceProfile,
                 MaxStreamingBitrate: 120000000,
                 StartTimeTicks: 0,
                 IsPlayback: false,
@@ -252,10 +163,55 @@
     }
 
     /**
-     * Parse the actual Jellyfin PlaybackInfo response.
-     *
-     * MediaSources[].SupportsDirectPlay / SupportsDirectStream / SupportsTranscoding
-     * tell us what the SERVER decided this device can do.
+     * Check if the browser supports a video codec via canPlayType().
+     */
+    function isVideoCodecSupported(codec) {
+        if (!codec) return false;
+        var video = document.createElement('video');
+        var tests = {
+            'h264': 'video/mp4; codecs="avc1.42E01E"',
+            'hevc': 'video/mp4; codecs="hvc1"',
+            'h265': 'video/mp4; codecs="hvc1"',
+            'vp9': 'video/webm; codecs="vp9"',
+            'vp8': 'video/webm; codecs="vp8"',
+            'av1': 'video/mp4; codecs="av01.0.01M.08"',
+            'mpeg2video': 'video/mp2t; codecs="mp2v"',
+            'vc1': 'video/mp4; codecs="vc-1"'
+        };
+        var test = tests[codec];
+        if (!test) return false;
+        var result = video.canPlayType(test);
+        return result === 'probably' || result === 'maybe';
+    }
+
+    /**
+     * Check if the browser supports an audio codec via canPlayType().
+     */
+    function isAudioCodecSupported(codec) {
+        if (!codec) return false;
+        var video = document.createElement('video');
+        var tests = {
+            'aac': 'audio/mp4; codecs="mp4a.40.2"',
+            'mp3': 'audio/mpeg',
+            'opus': 'audio/webm; codecs="opus"',
+            'flac': 'audio/flac',
+            'ac3': 'audio/mp4; codecs="ac-3"',
+            'eac3': 'audio/mp4; codecs="ec-3"',
+            'dts': 'audio/mp4; codecs="mp4a.a6"',
+            'dca': 'audio/mp4; codecs="mp4a.a6"',
+            'vorbis': 'audio/webm; codecs="vorbis"',
+            'pcm_s16le': 'audio/wav',
+            'pcm_s24le': 'audio/wav'
+        };
+        var test = tests[codec];
+        if (!test) return false;
+        var result = video.canPlayType(test);
+        return result === 'probably' || result === 'maybe';
+    }
+
+    /**
+     * Parse PlaybackInfo response by checking MediaStreams codecs
+     * against the browser's actual playback support.
      */
     function parsePlaybackResponse(resp) {
         const sources = resp.MediaSources || [];
@@ -265,30 +221,27 @@
 
         const src = sources[0];
         const container = (src.Container || '').toLowerCase();
+        const videoCodec = getStreamCodec(src, 'Video');
+        const audioCodec = getStreamCodec(src, 'Audio');
 
-        // DirectPlay = everything native, no remuxing
-        if (src.SupportsDirectPlay) {
-            return { type: 'direct', reason: null, container };
+        const videoSupported = isVideoCodecSupported(videoCodec);
+        const audioSupported = !audioCodec || isAudioCodecSupported(audioCodec);
+
+        if (videoSupported && audioSupported) {
+            // Codecs are supported — check if the container can be played directly
+            var directContainers = { 'mp4': 1, 'm4v': 1, 'mov': 1, 'webm': 1 };
+            if (directContainers[container]) {
+                return { type: 'direct', reason: null, container: container };
+            }
+            // Container needs remuxing but codecs are fine
+            return { type: 'stream', reason: 'container remux (' + container + ')', container: container };
         }
 
-        // DirectStream = container remuxed, video copied, audio may transcode
-        // Trust Jellyfin's response — if the server says DirectStream works, show it
-        if (src.SupportsDirectStream) {
-            const audioCodec = getStreamCodec(src, 'Audio');
-            return {
-                type: 'stream',
-                reason: 'video direct, audio may remux (' + (audioCodec || '?') + ')',
-                container
-            };
-        }
-
-        // Full transcode
-        if (src.SupportsTranscoding) {
-            return { type: 'transcode', reason: 'video + audio transcode', container };
-        }
-
-        // Nothing supported
-        return { type: 'transcode', reason: 'not playable on this device', container };
+        // Something needs transcoding
+        var reasons = [];
+        if (!videoSupported) reasons.push('video: ' + (videoCodec || 'unknown'));
+        if (audioCodec && !audioSupported) reasons.push('audio: ' + audioCodec);
+        return { type: 'transcode', reason: reasons.join(', '), container: container };
     }
 
     function getStreamCodec(source, streamType) {
@@ -401,10 +354,10 @@
         const css = document.createElement('style');
         css.id = 'jpi-styles';
         css.textContent = [
-            /* Overlay badge on card images (top-right corner) */
+            /* Overlay badge on card images (top-left corner) */
             '.jpi-card-wrapper { position: relative; }',
             '.jpi-badge-overlay {',
-            '  position: absolute; top: 4px; right: 4px; z-index: 10;',
+            '  position: absolute; top: 4px; left: 4px; z-index: 10;',
             '  display: inline-flex; align-items: center; gap: 3px;',
             '  padding: 2px 6px; border-radius: 4px;',
             '  font-size: 10px; font-weight: 700; line-height: 1.3;',
@@ -550,6 +503,9 @@
             const itemId = getItemId(el);
             if (!itemId) return;
 
+            // Permanently skip items already known to be non-playable types
+            if (_skippedItems.has(itemId)) return;
+
             // Cache key includes deviceId AND codec fingerprint for true per-device isolation
             const cacheKey = itemId + '_' + deviceId + '_' + fingerprint;
             const cached = getCache(cacheKey);
@@ -564,8 +520,9 @@
                 fetchItemType(itemId).then(function (type) {
                     if (_destroyed) return;
                     if (!PLAYABLE_TYPES.has(type)) {
+                        _skippedItems.add(itemId);
                         _processing.delete(itemId);
-                        return; // Skip seasons, series, artists, etc.
+                        return; // Skip seasons, series, artists, etc. permanently
                     }
 
                     placeBadge(el, itemId, 'loading');
@@ -636,8 +593,9 @@
         _intervals.push(setInterval(function () {
             if (window.location.href !== _lastUrl) {
                 _lastUrl = window.location.href;
-                // Clear inferred type cache on page change so new context is evaluated
+                // Clear inferred type cache and skipped items on page change so new context is evaluated
                 Object.keys(_typeCache).forEach(function (k) { delete _typeCache[k]; });
+                _skippedItems.clear();
                 setTimeout(scan, 600);
             }
         }, 1000));
