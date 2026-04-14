@@ -131,22 +131,31 @@
 
                             var tr = document.createElement('tr');
                             tr.style.borderBottom = '1px solid rgba(255,255,255,0.05)';
-                            tr.innerHTML =
-                                '<td style="padding:4px 8px;font-family:monospace;">' + truncate(itemId, 12) + '</td>' +
-                                '<td style="padding:4px 8px;font-family:monospace;">' + truncate(deviceId, 12) + '</td>' +
-                                '<td style="padding:4px 8px;">' + badgeLabel(data.type) + '</td>' +
-                                '<td style="padding:4px 8px;color:#aaa;">' + (data.reason || '—') + '</td>' +
-                                '<td style="padding:4px 8px;color:#888;font-size:12px;">' + expires + '</td>' +
-                                '<td style="padding:4px 4px;"></td>';
+
+                            function addCell(text, style) {
+                                var td = document.createElement('td');
+                                td.style.cssText = style;
+                                td.textContent = text;
+                                tr.appendChild(td);
+                                return td;
+                            }
+
+                            addCell(truncate(itemId, 12), 'padding:4px 8px;font-family:monospace;');
+                            addCell(truncate(deviceId, 12), 'padding:4px 8px;font-family:monospace;');
+                            addCell(badgeLabel(data.type), 'padding:4px 8px;');
+                            addCell(data.reason || '\u2014', 'padding:4px 8px;color:#aaa;');
+                            addCell(expires, 'padding:4px 8px;color:#888;font-size:12px;');
+                            var actionCell = addCell('', 'padding:4px 4px;');
+
                             var delBtn = document.createElement('button');
-                            delBtn.textContent = '✕';
+                            delBtn.textContent = '\u2715';
                             delBtn.title = 'Remove this entry';
                             delBtn.style.cssText = 'background:none;border:none;color:#e55;cursor:pointer;font-size:14px;padding:2px 6px;';
                             delBtn.addEventListener('click', function() {
                                 localStorage.removeItem(fullKey);
                                 refreshCacheTable();
                             });
-                            tr.lastChild.appendChild(delBtn);
+                            actionCell.appendChild(delBtn);
                             tbody.appendChild(tr);
                         } catch (_) {}
                     });

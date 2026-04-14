@@ -12,8 +12,12 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Jellyfin.Controller" Version="$(JellyfinVersion)" />
-    <PackageReference Include="Jellyfin.Model" Version="$(JellyfinVersion)" />
+    <PackageReference Include="Jellyfin.Controller" Version="$(JellyfinVersion)">
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="Jellyfin.Model" Version="$(JellyfinVersion)">
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
   </ItemGroup>
 
   <ItemGroup>
