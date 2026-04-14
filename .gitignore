@@ -6,3 +6,5 @@ publish/
 .idea/
 .vs/
 *.log
+out/
+*.zip
