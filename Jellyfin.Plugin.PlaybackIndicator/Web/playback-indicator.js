@@ -1,5 +1,5 @@
 /**
- * Jellyfin Playback Indicator v0.4.2
+ * Jellyfin Playback Indicator v0.4.3
  *
  * Shows Direct Play / Direct Stream / Transcode badges for episodes and movies.
  *
@@ -9,16 +9,20 @@
  *
  * Accuracy strategy (in order of preference):
  *   1. Pre-fetch the active session's DeviceProfile via GET /Sessions on
- *      startup — Jellyfin web posts its full profile when the session opens
- *      so this is accurate immediately.
+ *      startup — Jellyfin web / JMP / Android post their full profile when
+ *      the session opens so this is accurate immediately. Both top-level
+ *      `session.DeviceProfile` and `session.Capabilities.DeviceProfile` are
+ *      checked since different clients use different paths.
  *   2. Sniff outgoing real player calls (XHR + fetch) to /Items/{id}/PlaybackInfo
  *      and capture any richer profile they send.
- *   3. Permissive synthetic profile (mp4, mkv, ts, webm) as the last resort.
+ *   3. Synthetic profile as a last resort. Native-shell environments (JMP,
+ *      Android, etc.) get a maximal profile; browsers get a profile derived
+ *      from canPlayType().
  */
 (function () {
     'use strict';
 
-    const VERSION = '0.4.2';
+    const VERSION = '0.4.3';
 
     const RESULT_PREFIX = 'jpi_v4_';
     const TYPE_PREFIX = 'jpi_type_';
@@ -276,33 +280,35 @@
     }
 
     /**
-     * Pre-fetch the device profile from the active session. Jellyfin web posts
-     * its full DeviceProfile when the session opens, so this gives us an
-     * accurate profile right away — no waiting for a real play.
+     * Pre-fetch the device profile from the active session. Jellyfin web /
+     * JMP / Android all POST their full DeviceProfile when the session opens,
+     * so this gives us an accurate profile right away.
+     *
+     * Different clients store the profile in different places — we check both
+     * `session.DeviceProfile` (JMP, Android) and `session.Capabilities.DeviceProfile`
+     * (Jellyfin web, mobile web). We also prefer the session matching our
+     * deviceId in case the user has several active.
      */
     function fetchSessionProfile() {
         return new Promise(function (resolve) {
             try {
                 const ac = window.ApiClient;
                 if (!ac) { resolve(null); return; }
-                const deviceId = (ac.deviceId && ac.deviceId()) || '';
-                const url = serverAddress() + '/Sessions?DeviceId=' + encodeURIComponent(deviceId);
+                const myDeviceId = (ac.deviceId && ac.deviceId()) || '';
+                const url = serverAddress() + '/Sessions';
                 const xhr = new XMLHttpRequest();
                 xhr.timeout = 6000;
                 xhr.onload = function () {
                     try {
                         if (xhr.status >= 200 && xhr.status < 300) {
                             const sessions = JSON.parse(xhr.responseText);
-                            if (Array.isArray(sessions)) {
-                                for (let i = 0; i < sessions.length; i++) {
-                                    const cap = sessions[i] && sessions[i].Capabilities;
-                                    const dp = cap && cap.DeviceProfile;
-                                    if (dp && Array.isArray(dp.DirectPlayProfiles) &&
-                                        dp.DirectPlayProfiles.length >= 1) {
-                                        resolve(dp);
-                                        return;
-                                    }
-                                }
+                            const profile = pickSessionProfile(sessions, myDeviceId);
+                            if (profile) {
+                                console.info('[PlaybackIndicator] using device profile from session: ' +
+                                    (profile.Name || '(unnamed)') +
+                                    ' (' + (profile.DirectPlayProfiles || []).length + ' direct-play entries)');
+                                resolve(profile);
+                                return;
                             }
                         }
                     } catch (_) {}
@@ -316,6 +322,34 @@
                 xhr.send();
             } catch (_) { resolve(null); }
         });
+    }
+
+    function pickSessionProfile(sessions, myDeviceId) {
+        if (!Array.isArray(sessions)) return null;
+        const extract = function (s) {
+            if (!s) return null;
+            return s.DeviceProfile ||
+                (s.Capabilities && s.Capabilities.DeviceProfile) ||
+                null;
+        };
+        const isUsable = function (dp) {
+            return dp && Array.isArray(dp.DirectPlayProfiles) &&
+                dp.DirectPlayProfiles.length >= 1;
+        };
+
+        // Prefer the session whose DeviceId matches ours.
+        for (let i = 0; i < sessions.length; i++) {
+            if (sessions[i].DeviceId === myDeviceId) {
+                const dp = extract(sessions[i]);
+                if (isUsable(dp)) return dp;
+            }
+        }
+        // Fall back to any usable profile in the response.
+        for (let i = 0; i < sessions.length; i++) {
+            const dp = extract(sessions[i]);
+            if (isUsable(dp)) return dp;
+        }
+        return null;
     }
 
     function getDeviceProfile() {
@@ -332,12 +366,54 @@
     }
 
     /**
-     * Permissive fallback profile. Used until we can pull the real one from
-     * the active session or sniff one from a real play. Includes the
-     * containers Jellyfin web actually direct-plays (mkv via MSE, ts, mp4,
-     * webm) so MKV libraries don't all show up as Transcode by default.
+     * True if we're running inside a native-shell wrapper (Jellyfin Media
+     * Player, Jellyfin Android, etc.) where canPlayType() does NOT reflect
+     * actual playback capability — the wrapper hands streams to a native
+     * player (mpv, ExoPlayer) that handles far more codecs than the embedded
+     * <video> element advertises. Detected via the NativeShell global the
+     * shells inject, or via a User-Agent marker.
+     */
+    function isNativeShell() {
+        if (window.NativeShell) return true;
+        const ua = (navigator.userAgent || '').toLowerCase();
+        return ua.indexOf('jellyfin-media-player') !== -1 ||
+            ua.indexOf('jellyfinmediaplayer') !== -1 ||
+            ua.indexOf('jellyfinandroid') !== -1;
+    }
+
+    /**
+     * Synthetic fallback. Used only if the session profile fetch and the XHR
+     * /fetch sniffer have both failed to produce a real profile.
+     *
+     * For native shells (JMP, Android) we emit a maximal profile because
+     * those clients can play essentially anything via mpv/ExoPlayer; gating
+     * on canPlayType() would produce empty codec lists since native players
+     * bypass the HTML video element entirely.
+     *
+     * For real browsers we still derive from canPlayType() but seed the lists
+     * with codecs every modern browser actually plays (h264 + aac + mp3) so
+     * we never fall to "no direct-play possible" by accident.
      */
     function buildSyntheticProfile() {
+        if (isNativeShell()) {
+            console.info('[PlaybackIndicator] native shell detected; using permissive synthetic profile');
+            return {
+                Name: 'PlaybackIndicator Synthetic (native shell)',
+                MaxStreamingBitrate: 200000000,
+                MaxStaticBitrate: 200000000,
+                DirectPlayProfiles: [
+                    { Container: 'mp4,m4v,mov,mkv,avi,wmv,3gp,3g2,m2ts,mts,ts,mpegts,asf,flv,vob,ogm,ogv,webm',
+                      Type: 'Video',
+                      VideoCodec: 'h264,h265,hevc,vp8,vp9,av1,mpeg4,mpeg2video,vc1,wmv3',
+                      AudioCodec: 'aac,mp3,ac3,eac3,dts,dca,truehd,mlp,flac,opus,vorbis,wma,wmav2,pcm,pcm_s16le,pcm_s24le' }
+                ],
+                TranscodingProfiles: [
+                    { Container: 'ts', Type: 'Video', VideoCodec: 'h264',
+                      AudioCodec: 'aac,mp3,ac3', Context: 'Streaming', Protocol: 'hls' }
+                ]
+            };
+        }
+
         const v = document.createElement('video');
         const cp = function (t) { try { return v.canPlayType(t); } catch (_) { return ''; } };
         const has = function (t) { return cp(t) !== ''; };
@@ -347,6 +423,8 @@
         const supportsAV1 = has('video/mp4; codecs="av01.0.01M.08"');
         const supportsAC3 = has('audio/mp4; codecs="ac-3"') || has('audio/ac3');
 
+        // Seed with codecs every modern browser actually plays so empty
+        // canPlayType() responses never strand us on "no codecs supported".
         const videoCodecs = ['h264', 'vp8'];
         if (supportsHevc) videoCodecs.push('hevc', 'h265');
         if (supportsVP9) videoCodecs.push('vp9');
@@ -355,8 +433,11 @@
         const audioCodecs = ['aac', 'mp3', 'opus', 'flac', 'vorbis'];
         if (supportsAC3) audioCodecs.push('ac3', 'eac3');
 
+        console.info('[PlaybackIndicator] no captured profile, using browser synthetic; codecs: video=' +
+            videoCodecs.join('/') + ' audio=' + audioCodecs.join('/'));
+
         return {
-            Name: 'PlaybackIndicator Synthetic',
+            Name: 'PlaybackIndicator Synthetic (browser)',
             MaxStreamingBitrate: 120000000,
             MaxStaticBitrate: 120000000,
             DirectPlayProfiles: [

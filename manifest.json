@@ -9,6 +9,14 @@
     "imageUrl": "https://raw.githubusercontent.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/main/icon.png",
     "versions": [
       {
+        "changelog": "Fix Direct Stream items mis-marked as Transcode and Jellyfin Media Player / Android Native Shell showing everything as Transcode. Session profile lookup now checks both session.DeviceProfile and session.Capabilities.DeviceProfile (different clients use different paths) and prefers the session whose DeviceId matches ours. Synthetic fallback detects native-shell environments (window.NativeShell or JMP/Android UA) and emits a permissive profile because canPlayType() doesn't reflect mpv/ExoPlayer capability. Console now logs which profile source is in use.",
+        "targetAbi": "10.11.0",
+        "version": "0.4.3.0",
+        "sourceUrl": "https://github.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/releases/download/0.4.3.0/Jellyfin.Plugin.PlaybackIndicator_0.4.3.0.zip",
+        "checksum": "7d168a1a6be199cd97aa0eef29f4d056",
+        "timestamp": "2026-04-30"
+      },
+      {
         "changelog": "Fix wrong-status-on-everything: pre-fetch the active session's DeviceProfile via GET /Sessions on startup so predictions are accurate from the first scan; sniff fetch() in addition to XMLHttpRequest; broaden the synthetic fallback to include MKV / TS / m2ts containers; invalidate the result cache and re-scan when the captured profile changes; bumped result cache prefix to drop stale predictions from 0.4.0/0.4.1.",
         "targetAbi": "10.11.0",
         "version": "0.4.2.0",
