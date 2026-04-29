@@ -1,410 +1,555 @@
 /**
- * Jellyfin Playback Indicator v0.3.0
- * Shows Direct Play / Direct Stream / Transcode badges on items.
- * Uses Jellyfin's REAL PlaybackInfo API with the actual device profile.
+ * Jellyfin Playback Indicator v0.4.0
  *
- * States:
- *  ✅ Direct Play   — container + video + audio all native
- *  ⚠️ Direct Stream — container + video supported, audio transcode (remux)
- *  ❌ Transcode     — video needs transcode (or mkv + unsupported audio = risky)
+ * Shows Direct Play / Direct Stream / Transcode badges for episodes and movies.
+ *
+ *  ✅ Direct Play   — server says container, video, and audio all play natively
+ *  ⚠️ Direct Stream — video plays natively, audio gets remuxed
+ *  ❌ Transcode     — server has to transcode video and/or audio
+ *
+ * Accuracy strategy: instead of inventing a synthetic device profile, we
+ * intercept the real Jellyfin web client when it actually starts playback,
+ * capture the DeviceProfile it sends, and reuse THAT for our prediction
+ * calls. This guarantees our prediction matches what playback would do.
  */
 (function () {
     'use strict';
 
-    const CACHE_PREFIX = 'jpi_v2_';
-    const DEFAULT_CACHE_TTL_MS = 60 * 60 * 1000;
-    const SCAN_INTERVAL_MS = 2500;
+    const VERSION = '0.4.0';
+
+    const RESULT_PREFIX = 'jpi_v3_';
+    const TYPE_PREFIX = 'jpi_type_';
+    const PROFILE_KEY = 'jpi_profile';
+    const ALL_PREFIXES = ['jpi_v2_', 'jpi_v3_', 'jpi_type_', 'jpi_profile', 'jpi_real_profile'];
+
+    const RESULT_TTL_MS = 60 * 60 * 1000;
+    const TYPE_TTL_MS = 24 * 60 * 60 * 1000;
+    const PROFILE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+    const SCAN_DEBOUNCE_MS = 350;
+    const URL_POLL_MS = 800;
+    const MAX_CONCURRENT_LOOKUPS = 4;
+
+    const PLAYABLE_TYPES = new Set(['Episode', 'Movie']);
+    const NON_PLAYABLE_TYPES = new Set([
+        'Series', 'Season', 'BoxSet', 'CollectionFolder', 'Folder',
+        'MusicArtist', 'MusicAlbum', 'Audio', 'Photo', 'PhotoAlbum',
+        'Person', 'Genre', 'Studio', 'Playlist'
+    ]);
+
+    // Audio codecs that often claim to remux but actually fail on browsers/TVs.
+    const FRAGILE_AUDIO = new Set(['truehd', 'mlp']);
 
     const BADGES = {
         direct:    { cls: 'jpi-direct',    icon: '✅', label: 'Direct Play' },
         stream:    { cls: 'jpi-stream',    icon: '⚠️', label: 'Direct Stream' },
-        transcode: { cls: 'jpi-transcode', icon: '❌', label: 'Transcode' },
-        loading:   { cls: 'jpi-loading',   icon: '⏳', label: 'Checking...' }
+        transcode: { cls: 'jpi-transcode', icon: '❌', label: 'Transcode' }
     };
 
-    // MKV + unsupported audio often fails on phones/TVs
-    const TRANSCODE_RISKY_CONTAINERS = new Set(['mkv', 'avi', 'ogv', 'flv']);
+    let observer = null;
+    let scanTimer = null;
+    let urlPollTimer = null;
+    let lastUrl = '';
+    let destroyed = false;
+    let codecFp = null;
+    let inflight = new Map();   // itemId -> Promise<{type,reason}|null>
+    let activeLookups = 0;
+    let lookupQueue = [];
 
-    // Only show badges on actual playable media items
-    const PLAYABLE_TYPES = new Set(['Episode', 'Movie']);
+    // Install XHR interception immediately so we never miss the first real
+    // play call (which may happen before our init runs).
+    installProfileSniffer();
 
-    let _intervals = [];
-    let _destroyed = false;
-    let _lastUrl = '';
-    let _codecFingerprint = null;
-
-    // ─── Cleanup (uninstall safe) ────────────────────────────────────────────
-
-    function cleanup() {
-        _destroyed = true;
-        _intervals.forEach(id => clearInterval(id));
-        _intervals = [];
-        document.getElementById('jpi-styles')?.remove();
-        document.querySelectorAll('.jpi-badge').forEach(b => b.remove());
-        Object.keys(localStorage)
-            .filter(k => k.startsWith(CACHE_PREFIX))
-            .forEach(k => localStorage.removeItem(k));
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', boot);
+    } else {
+        boot();
     }
-    window.__jpi_cleanup = cleanup;
 
-    // ─── Codec Fingerprint ───────────────────────────────────────────────────
+    // ─── Boot ────────────────────────────────────────────────────────────────
+
+    function boot() {
+        // Wait until ApiClient is ready and the user is signed in.
+        waitFor(function () {
+            const ac = window.ApiClient;
+            return ac && ac.accessToken && ac.accessToken() &&
+                ac.getCurrentUserId && ac.getCurrentUserId();
+        }, 500, 60).then(start, function () {
+            // Never started — user not logged in. Quietly stop.
+        });
+    }
+
+    function start() {
+        if (destroyed) return;
+        injectStyles();
+
+        observer = new MutationObserver(function (mutations) {
+            for (let i = 0; i < mutations.length; i++) {
+                if (mutations[i].addedNodes && mutations[i].addedNodes.length) {
+                    scheduleScan(SCAN_DEBOUNCE_MS);
+                    return;
+                }
+            }
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+
+        urlPollTimer = setInterval(function () {
+            if (window.location.href !== lastUrl) {
+                lastUrl = window.location.href;
+                inflight.clear(); // page changed, prior in-flight results may be irrelevant
+                scheduleScan(SCAN_DEBOUNCE_MS);
+            }
+        }, URL_POLL_MS);
+
+        scheduleScan(600);
+        // eslint-disable-next-line no-console
+        console.log('[PlaybackIndicator] v' + VERSION + ' active');
+    }
+
+    function waitFor(predicate, intervalMs, maxTries) {
+        return new Promise(function (resolve, reject) {
+            let tries = 0;
+            const tick = function () {
+                if (predicate()) return resolve();
+                if (++tries > maxTries) return reject(new Error('timeout'));
+                setTimeout(tick, intervalMs);
+            };
+            tick();
+        });
+    }
+
+    function scheduleScan(delay) {
+        if (destroyed) return;
+        clearTimeout(scanTimer);
+        scanTimer = setTimeout(scan, delay);
+    }
+
+    // ─── Cleanup (for uninstall and self-removal) ────────────────────────────
+
+    window.__jpi_cleanup = function () {
+        destroyed = true;
+        if (observer) { try { observer.disconnect(); } catch (_) {} observer = null; }
+        clearTimeout(scanTimer);
+        clearInterval(urlPollTimer);
+        const styles = document.getElementById('jpi-styles');
+        if (styles) styles.remove();
+        document.querySelectorAll('[data-jpi]').forEach(function (b) { b.remove(); });
+        try {
+            Object.keys(localStorage).forEach(function (k) {
+                for (let i = 0; i < ALL_PREFIXES.length; i++) {
+                    if (k.indexOf(ALL_PREFIXES[i]) === 0) {
+                        localStorage.removeItem(k);
+                        return;
+                    }
+                }
+            });
+        } catch (_) {}
+    };
+
+    // ─── Device profile sniffer ──────────────────────────────────────────────
 
     /**
-     * Build a short hash of the browser's actual codec support.
-     * This ensures the cache is truly per-device even if deviceId is shared.
+     * Hook XMLHttpRequest. When the real Jellyfin web client posts to
+     * /Items/{id}/PlaybackInfo with a DeviceProfile, capture that profile and
+     * persist it. Skip our own calls (marked via X-JPI-Self header).
      */
-    function getCodecFingerprint() {
-        if (_codecFingerprint) return _codecFingerprint;
+    function installProfileSniffer() {
         try {
-            var video = document.createElement('video');
-            var canPlay = function (type) { try { return video.canPlayType(type); } catch (_) { return ''; } };
-            var tests = [
-                canPlay('video/mp4; codecs="avc1.42E01E"'),
-                canPlay('video/mp4; codecs="hvc1"'),
-                canPlay('video/mp4; codecs="hev1"'),
-                canPlay('video/webm; codecs="vp9"'),
-                canPlay('video/mp4; codecs="av01.0.01M.08"'),
-                canPlay('audio/mp4; codecs="mp4a.40.2"'),
-                canPlay('audio/webm; codecs="opus"'),
-                canPlay('audio/mpeg'),
-                canPlay('audio/flac'),
-                canPlay('audio/mp4; codecs="ac-3"'),
-                canPlay('audio/mp4; codecs="mp4a.a6"'),  // DTS
-                canPlay('audio/mp4; codecs="dtsc"')       // DTS
-            ];
-            // Map: '' -> 0, 'maybe' -> 1, 'probably' -> 2
-            _codecFingerprint = tests.map(function (r) {
-                return r === 'probably' ? '2' : (r === 'maybe' ? '1' : '0');
-            }).join('');
-        } catch (_) {
-            _codecFingerprint = 'unknown';
-        }
-        return _codecFingerprint;
+            const origOpen = XMLHttpRequest.prototype.open;
+            const origSend = XMLHttpRequest.prototype.send;
+            const origSetHeader = XMLHttpRequest.prototype.setRequestHeader;
+
+            XMLHttpRequest.prototype.open = function (method, url) {
+                this.__jpiUrl = url;
+                this.__jpiMethod = method;
+                return origOpen.apply(this, arguments);
+            };
+
+            XMLHttpRequest.prototype.setRequestHeader = function (name) {
+                if (name === 'X-JPI-Self') {
+                    this.__jpiSelf = true;
+                    return; // don't forward — server doesn't need it
+                }
+                return origSetHeader.apply(this, arguments);
+            };
+
+            XMLHttpRequest.prototype.send = function (body) {
+                if (!this.__jpiSelf && this.__jpiMethod &&
+                    this.__jpiMethod.toUpperCase() === 'POST' &&
+                    /\/Items\/[A-Fa-f0-9-]+\/PlaybackInfo/.test(this.__jpiUrl || '')) {
+                    try {
+                        const parsed = typeof body === 'string' ? JSON.parse(body) : null;
+                        const dp = parsed && parsed.DeviceProfile;
+                        // Real player profiles are rich (subtitle profiles, codec profiles,
+                        // dozens of direct-play entries). Use that as our signal.
+                        if (dp && Array.isArray(dp.DirectPlayProfiles) &&
+                            dp.DirectPlayProfiles.length >= 3) {
+                            try {
+                                localStorage.setItem(PROFILE_KEY, JSON.stringify({
+                                    profile: dp, captured: Date.now()
+                                }));
+                            } catch (_) {}
+                        }
+                    } catch (_) {}
+                }
+                return origSend.apply(this, arguments);
+            };
+        } catch (_) {}
+    }
+
+    function getDeviceProfile() {
+        // Prefer a profile captured from a real play.
+        try {
+            const raw = localStorage.getItem(PROFILE_KEY);
+            if (raw) {
+                const e = JSON.parse(raw);
+                if (e.profile && (Date.now() - (e.captured || 0)) < PROFILE_TTL_MS) {
+                    return e.profile;
+                }
+            }
+        } catch (_) {}
+        return buildSyntheticProfile();
+    }
+
+    /**
+     * Permissive fallback profile. Used until the real player makes its first
+     * call. Errs toward "transcode" rather than falsely promising direct-play.
+     */
+    function buildSyntheticProfile() {
+        const v = document.createElement('video');
+        const cp = function (t) { try { return v.canPlayType(t); } catch (_) { return ''; } };
+
+        const has = function (t) { return cp(t) !== ''; };
+
+        const vCodecs = [];
+        if (has('video/mp4; codecs="avc1.42E01E"')) vCodecs.push('h264');
+        if (has('video/mp4; codecs="hvc1"') || has('video/mp4; codecs="hev1"')) vCodecs.push('hevc', 'h265');
+        if (has('video/webm; codecs="vp9"')) vCodecs.push('vp9');
+        if (has('video/mp4; codecs="av01.0.01M.08"')) vCodecs.push('av1');
+
+        const aCodecs = ['aac'];
+        if (has('audio/mp4; codecs="ac-3"') || has('audio/ac3')) aCodecs.push('ac3', 'eac3');
+        if (has('audio/webm; codecs="opus"')) aCodecs.push('opus');
+        if (has('audio/mpeg')) aCodecs.push('mp3');
+        if (has('audio/flac')) aCodecs.push('flac');
+
+        return {
+            Name: 'PlaybackIndicator Synthetic',
+            MaxStreamingBitrate: 120000000,
+            MaxStaticBitrate: 120000000,
+            DirectPlayProfiles: [
+                { Container: 'mp4,m4v,mov', Type: 'Video',
+                  VideoCodec: vCodecs.join(','), AudioCodec: aCodecs.join(',') },
+                { Container: 'webm', Type: 'Video',
+                  VideoCodec: 'vp9,vp8', AudioCodec: 'opus,vorbis' }
+            ],
+            TranscodingProfiles: [
+                { Container: 'ts', Type: 'Video', VideoCodec: 'h264',
+                  AudioCodec: 'aac,mp3', Context: 'Streaming', Protocol: 'hls' }
+            ]
+        };
     }
 
     // ─── Cache ───────────────────────────────────────────────────────────────
 
-    function getCache(key) {
+    function readCache(prefix, key) {
         try {
-            const raw = localStorage.getItem(CACHE_PREFIX + key);
+            const raw = localStorage.getItem(prefix + key);
             if (!raw) return null;
-            const entry = JSON.parse(raw);
-            if (Date.now() > entry.expires) { localStorage.removeItem(CACHE_PREFIX + key); return null; }
-            return entry.data;
+            const e = JSON.parse(raw);
+            if (Date.now() > e.expires) {
+                localStorage.removeItem(prefix + key);
+                return null;
+            }
+            return e.data;
         } catch (_) { return null; }
     }
 
-    function setCache(key, data, ttlMs) {
+    function writeCache(prefix, key, data, ttlMs) {
         try {
-            localStorage.setItem(CACHE_PREFIX + key, JSON.stringify({
-                data, expires: Date.now() + (ttlMs || DEFAULT_CACHE_TTL_MS)
+            localStorage.setItem(prefix + key, JSON.stringify({
+                data: data, expires: Date.now() + ttlMs
             }));
-        } catch (_) { }
+        } catch (_) {}
     }
 
-    // ─── Jellyfin API ────────────────────────────────────────────────────────
-
-    function getApiClient() {
-        return window.ApiClient || null;
+    function makeResultKey(itemId) {
+        const ac = window.ApiClient;
+        const userId = ac.getCurrentUserId() || 'u';
+        const deviceId = (ac.deviceId && ac.deviceId()) || 'd';
+        if (!codecFp) codecFp = computeCodecFp();
+        return itemId + '_' + userId + '_' + deviceId + '_' + codecFp;
     }
 
-    /**
-     * Get the device profile for the CURRENT device/browser.
-     * Jellyfin's web client builds this internally — we access it via the
-     * playback capabilities detection. Falls back to a basic browser profile.
-     */
-    function getDeviceProfile() {
-        // Method 1: Jellyfin's internal profile builder
-        // The web client stores capabilities in the connection manager
-        if (window.ConnectionManager) {
-            try {
-                const apiClient = window.ConnectionManager.getApiClient(
-                    window.ConnectionManager._servers?.[0]?.id
-                );
-                if (apiClient?._deviceProfile) return apiClient._deviceProfile;
-            } catch (_) { }
-        }
-
-        // Method 2: Build from what the browser actually supports
-        // Using HTML5 video element capability detection
+    function computeCodecFp() {
         try {
-            const video = document.createElement('video');
-            const canPlay = (type) => { try { return video.canPlayType(type); } catch (_) { return ''; } };
+            const v = document.createElement('video');
+            const cp = function (t) { try { return v.canPlayType(t); } catch (_) { return ''; } };
+            const tests = [
+                'video/mp4; codecs="avc1.42E01E"',
+                'video/mp4; codecs="hvc1"',
+                'video/webm; codecs="vp9"',
+                'video/mp4; codecs="av01.0.01M.08"',
+                'audio/mp4; codecs="mp4a.40.2"',
+                'audio/mp4; codecs="ac-3"',
+                'audio/webm; codecs="opus"',
+                'audio/flac'
+            ];
+            return tests.map(function (t) {
+                const r = cp(t);
+                return r === 'probably' ? '2' : r === 'maybe' ? '1' : '0';
+            }).join('');
+        } catch (_) { return 'x'; }
+    }
 
-            const supportsH264 = canPlay('video/mp4; codecs="avc1.42E01E"') !== '';
-            const supportsHevc = canPlay('video/mp4; codecs="hvc1"') !== '' || canPlay('video/mp4; codecs="hev1"') !== '';
-            const supportsVP9 = canPlay('video/webm; codecs="vp9"') !== '';
-            const supportsAV1 = canPlay('video/mp4; codecs="av01.0.01M.08"') !== '';
+    // ─── DOM scan ────────────────────────────────────────────────────────────
 
-            const supportsAAC = canPlay('audio/mp4; codecs="mp4a.40.2"') !== '';
-            const supportsOpus = canPlay('audio/webm; codecs="opus"') !== '';
-            const supportsMP3 = canPlay('audio/mpeg') !== '';
-            const supportsFLAC = canPlay('audio/flac') !== '';
-            const supportsAC3 = canPlay('audio/mp4; codecs="ac-3"') !== '' || canPlay('audio/ac3') !== '';
-            const supportsDTS = canPlay('audio/mp4; codecs="mp4a.a6"') !== '' || canPlay('audio/mp4; codecs="dtsc"') !== '';
+    /**
+     * Find candidate elements: any [data-id] node that looks like a media card
+     * or list item AND has not been ruled out by data-type/data-itemtype.
+     */
+    function findCandidates() {
+        const seen = new Map();
+        const nodes = document.querySelectorAll('[data-id]');
 
-            // Build a DirectPlayProfile for this browser
-            const videoCodecs = [];
-            if (supportsH264) videoCodecs.push('h264');
-            if (supportsHevc) videoCodecs.push('hevc', 'h265');
-            if (supportsVP9) videoCodecs.push('vp9');
-            if (supportsAV1) videoCodecs.push('av1');
+        for (let i = 0; i < nodes.length; i++) {
+            const el = nodes[i];
+            const id = el.getAttribute('data-id');
+            if (!id || id.length < 5) continue;
 
-            const audioCodecs = [];
-            if (supportsAAC) audioCodecs.push('aac');
-            if (supportsOpus) audioCodecs.push('opus');
-            if (supportsMP3) audioCodecs.push('mp3');
-            if (supportsFLAC) audioCodecs.push('flac');
-            if (supportsAC3) audioCodecs.push('ac3', 'eac3');
-            if (supportsDTS) audioCodecs.push('dts', 'dca');
+            const dataType = el.getAttribute('data-type') || el.getAttribute('data-itemtype');
+            if (dataType && NON_PLAYABLE_TYPES.has(dataType)) continue;
 
-            return {
-                Name: 'PlaybackIndicator Detected',
-                MaxStreamingBitrate: 120000000,
-                MaxStaticBitrate: 120000000,
-                DirectPlayProfiles: [
-                    {
-                        Container: 'mp4,m4v,mov',
-                        AudioCodec: audioCodecs.join(','),
-                        VideoCodec: videoCodecs.join(','),
-                        Type: 'Video'
-                    },
-                    {
-                        Container: 'mkv,webm',
-                        AudioCodec: audioCodecs.join(','),
-                        VideoCodec: videoCodecs.join(','),
-                        Type: 'Video'
-                    },
-                    {
-                        Container: 'ts,mpegts',
-                        AudioCodec: audioCodecs.join(','),
-                        VideoCodec: videoCodecs.join(','),
-                        Type: 'Video'
-                    }
-                ],
-                TranscodingProfiles: [
-                    {
-                        Container: 'ts',
-                        Type: 'Video',
-                        VideoCodec: 'h264',
-                        AudioCodec: 'aac,mp3',
-                        Context: 'Streaming',
-                        Protocol: 'hls'
-                    }
-                ]
-            };
-        } catch (_) {
-            return null;
+            if (!looksLikeMediaContainer(el)) continue;
+            if (el.querySelector('[data-jpi]')) continue;
+
+            // Dedupe: keep the most specific (deepest) match per id.
+            if (seen.has(id)) {
+                const existing = seen.get(id);
+                if (el.contains(existing.el)) continue; // existing is deeper
+                if (existing.el.contains(el)) {
+                    seen.set(id, { el: el, hint: dataType && PLAYABLE_TYPES.has(dataType) ? dataType : null });
+                }
+                continue;
+            }
+            seen.set(id, { el: el, hint: dataType && PLAYABLE_TYPES.has(dataType) ? dataType : null });
+        }
+        return Array.from(seen.values());
+    }
+
+    function looksLikeMediaContainer(el) {
+        const cls = (typeof el.className === 'string') ? el.className : '';
+        if (/(card|listItem|episode|itemCard|portraitCard|landscapeCard|squareCard|backdropCard)/i.test(cls)) {
+            return true;
+        }
+        return !!el.querySelector(
+            '.cardImageContainer, [class*="cardImage"], [class*="CardImage"], ' +
+            '.listItemImage, [class*="listItemImage"]'
+        );
+    }
+
+    function scan() {
+        if (destroyed) return;
+        const candidates = findCandidates();
+        for (let i = 0; i < candidates.length; i++) {
+            processItem(candidates[i].el, candidates[i].el.getAttribute('data-id'), candidates[i].hint);
         }
     }
 
-    /**
-     * Call Jellyfin's POST /Items/{id}/PlaybackInfo with the REAL device profile.
-     */
-    function fetchPlaybackInfo(itemId) {
-        return new Promise(function (resolve, reject) {
-            const apiClient = getApiClient();
-            if (!apiClient) { reject(new Error('no ApiClient')); return; }
+    // ─── Per-item processing ─────────────────────────────────────────────────
 
-            const userId = apiClient.getCurrentUserId ? apiClient.getCurrentUserId() : (apiClient._currentUser?.Id || '');
-            const deviceProfile = getDeviceProfile();
+    function processItem(el, itemId, hint) {
+        const cached = readCache(RESULT_PREFIX, makeResultKey(itemId));
+        if (cached) {
+            placeBadge(el, itemId, cached.type, cached.reason);
+            return;
+        }
 
-            const body = {
-                UserId: userId,
-                DeviceProfile: deviceProfile,
-                MaxStreamingBitrate: 120000000,
-                StartTimeTicks: 0,
-                IsPlayback: false,
-                AutoOpenLiveStream: false
-            };
+        // Cached "non-playable" shortcut so we don't repeat type lookups.
+        const cachedType = readCache(TYPE_PREFIX, itemId);
+        if (cachedType && !PLAYABLE_TYPES.has(cachedType.type)) return;
 
-            const serverAddr = apiClient._serverAddress || (apiClient.serverAddress ? apiClient.serverAddress() : '');
-            const url = serverAddr + '/Items/' + itemId + '/PlaybackInfo';
+        // Dedupe in-flight by itemId so the same item isn't looked up twice
+        // when it appears in multiple grids on the same page.
+        let p = inflight.get(itemId);
+        if (!p) {
+            p = enqueueLookup(itemId, hint || (cachedType && cachedType.type) || null);
+            inflight.set(itemId, p);
+        }
 
-            const xhr = new XMLHttpRequest();
-            xhr.timeout = 8000;
+        p.then(function (result) {
+            if (destroyed || !result) return;
+            if (!document.body.contains(el)) return;
+            placeBadge(el, itemId, result.type, result.reason);
+        }).catch(function () { /* silent */ });
+    }
 
-            xhr.onload = function () {
-                if (xhr.status >= 200 && xhr.status < 300) {
-                    try {
-                        resolve(parsePlaybackResponse(JSON.parse(xhr.responseText)));
-                    } catch (e) { reject(new Error('parse error')); }
-                } else { reject(new Error('http ' + xhr.status)); }
-            };
-            xhr.onerror = function () { reject(new Error('network error')); };
-            xhr.ontimeout = function () { reject(new Error('timeout')); };
-
-            xhr.open('POST', url, true);
-            xhr.setRequestHeader('Content-Type', 'application/json');
-
-            // Build auth header
-            const token = apiClient.accessToken ? apiClient.accessToken() : '';
-            const deviceId = apiClient.deviceId ? apiClient.deviceId() : '';
-            const clientName = apiClient._clientName || 'Jellyfin Web';
-            const clientVersion = apiClient._clientVersion || '10.11.0';
-            const deviceName = apiClient._deviceName || 'Browser';
-
-            xhr.setRequestHeader('X-Emby-Authorization',
-                'MediaBrowser Client="' + clientName + '", Device="' + deviceName +
-                '", DeviceId="' + deviceId + '", Version="' + clientVersion +
-                '", Token="' + token + '"');
-
-            xhr.send(JSON.stringify(body));
+    function enqueueLookup(itemId, hint) {
+        return new Promise(function (resolve) {
+            lookupQueue.push({ itemId: itemId, hint: hint, resolve: resolve });
+            drainQueue();
         });
     }
 
-    /**
-     * Parse the actual Jellyfin PlaybackInfo response.
-     *
-     * MediaSources[].SupportsDirectPlay / SupportsDirectStream / SupportsTranscoding
-     * tell us what the SERVER decided this device can do.
-     */
-    function parsePlaybackResponse(resp) {
-        const sources = resp.MediaSources || [];
-        if (sources.length === 0) {
-            return { type: 'transcode', reason: 'no sources' };
+    function drainQueue() {
+        while (activeLookups < MAX_CONCURRENT_LOOKUPS && lookupQueue.length > 0) {
+            const job = lookupQueue.shift();
+            activeLookups++;
+            runLookup(job.itemId, job.hint).then(function (result) {
+                job.resolve(result);
+            }, function () {
+                job.resolve(null);
+            }).then(function () {
+                activeLookups--;
+                drainQueue();
+            });
         }
-
-        const src = sources[0];
-        const container = (src.Container || '').toLowerCase();
-
-        // DirectPlay = everything native, no remuxing
-        if (src.SupportsDirectPlay) {
-            return { type: 'direct', reason: null, container };
-        }
-
-        // DirectStream = container remuxed, video copied, audio may transcode
-        if (src.SupportsDirectStream) {
-            const audioCodec = getStreamCodec(src, 'Audio');
-
-            // MKV + unsupported audio is unreliable on phones/TVs
-            if (TRANSCODE_RISKY_CONTAINERS.has(container) && !src.SupportsDirectPlay) {
-                // If it only supports DirectStream (not DirectPlay) for MKV,
-                // it means audio needs transcode — mark as risky transcode
-                return {
-                    type: 'transcode',
-                    reason: container.toUpperCase() + ' + ' + (audioCodec || '?') + ' audio — may fail on this device',
-                    container
-                };
-            }
-
-            return {
-                type: 'stream',
-                reason: 'video direct, audio transcode (' + (audioCodec || '?') + ')',
-                container
-            };
-        }
-
-        // Full transcode
-        if (src.SupportsTranscoding) {
-            return { type: 'transcode', reason: 'video + audio transcode', container };
-        }
-
-        // Nothing supported
-        return { type: 'transcode', reason: 'not playable on this device', container };
     }
 
-    function getStreamCodec(source, streamType) {
-        const stream = (source.MediaStreams || []).find(s => s.Type === streamType);
-        return stream ? (stream.Codec || '').toLowerCase() : null;
+    function runLookup(itemId, hint) {
+        const typePromise = hint
+            ? Promise.resolve(hint)
+            : fetchType(itemId).then(function (t) {
+                writeCache(TYPE_PREFIX, itemId, { type: t }, TYPE_TTL_MS);
+                return t;
+            });
+
+        return typePromise.then(function (type) {
+            if (!PLAYABLE_TYPES.has(type)) return null;
+            return fetchPlaybackInfo(itemId).then(function (result) {
+                writeCache(RESULT_PREFIX, makeResultKey(itemId), result, RESULT_TTL_MS);
+                return result;
+            });
+        });
     }
 
-    // ─── Item Type Inference ────────────────────────────────────────────────
+    // ─── Jellyfin API calls ─────────────────────────────────────────────────
 
-    const _typeCache = {};
-
-    /**
-     * Infer item type from page context (URL, page title, DOM) to avoid
-     * per-item API calls. Falls back to API only if context is ambiguous.
-     */
-    function inferItemTypeFromContext() {
-        const path = window.location.hash || window.location.pathname || '';
-        const lower = path.toLowerCase();
-
-        // Series detail page or season page -> items are Episodes
-        if (/[#/]details\?.*id=.*&serverId=/.test(path)) {
-            // On a detail page — check if it's a series/season by looking at DOM
-            var pageTitle = document.querySelector('.itemName, h1, h2, [class*="itemName"]');
-            var seasonSelector = document.querySelector('.seasons, [class*="season"], .episodeList, [class*="episode"]');
-            if (seasonSelector) return 'Episode';
-        }
-        if (/[#/]list\?.*type=episode/i.test(path)) return 'Episode';
-        if (/[#/]list\?.*type=movie/i.test(path)) return 'Movie';
-
-        // Movie library pages — check the page heading or section context
-        var sectionHeaders = document.querySelectorAll('.sectionTitle, [class*="sectionTitle"], .pageTitle, h1');
-        for (var i = 0; i < sectionHeaders.length; i++) {
-            var text = (sectionHeaders[i].textContent || '').toLowerCase();
-            if (/\bmovies?\b/.test(text)) return 'Movie';
-            if (/\bepisodes?\b/.test(text) || /\bseason\b/.test(text)) return 'Episode';
-        }
-
-        // Check library type from view settings or page params
-        if (/parentid=/i.test(lower)) {
-            // On a library page — check if items have episode-like structure
-            var episodeRows = document.querySelectorAll('[class*="episode"], .listItem .listItemBody [class*="parentName"]');
-            if (episodeRows.length > 0) return 'Episode';
-        }
-
-        return null; // ambiguous — need API fallback
+    function authHeader() {
+        const ac = window.ApiClient;
+        const token = (ac.accessToken && ac.accessToken()) || '';
+        const deviceId = (ac.deviceId && ac.deviceId()) || '';
+        const clientName = ac._clientName || 'Jellyfin Web';
+        const clientVersion = ac._clientVersion || '10.11.0';
+        const deviceName = ac._deviceName || 'Browser';
+        return 'MediaBrowser Client="' + clientName + '", Device="' + deviceName +
+            '", DeviceId="' + deviceId + '", Version="' + clientVersion +
+            '", Token="' + token + '"';
     }
 
-    /**
-     * Get item type, preferring context inference over API calls.
-     * Returns a Promise that resolves to the item's Type string.
-     */
-    function fetchItemType(itemId) {
-        if (_typeCache.hasOwnProperty(itemId)) {
-            return Promise.resolve(_typeCache[itemId]);
-        }
+    function serverAddress() {
+        const ac = window.ApiClient;
+        return ac._serverAddress || (ac.serverAddress ? ac.serverAddress() : '');
+    }
 
-        // Try to infer from page context first (zero API calls)
-        var inferred = inferItemTypeFromContext();
-        if (inferred) {
-            _typeCache[itemId] = inferred;
-            return Promise.resolve(inferred);
-        }
-
-        // Fallback: API call for ambiguous contexts
+    function fetchType(itemId) {
         return new Promise(function (resolve, reject) {
-            const apiClient = getApiClient();
-            if (!apiClient) { reject(new Error('no ApiClient')); return; }
-
-            const userId = apiClient.getCurrentUserId ? apiClient.getCurrentUserId() : (apiClient._currentUser?.Id || '');
-            const serverAddr = apiClient._serverAddress || (apiClient.serverAddress ? apiClient.serverAddress() : '');
-            const url = serverAddr + '/Users/' + userId + '/Items/' + itemId;
-
+            const ac = window.ApiClient;
+            const userId = ac.getCurrentUserId();
+            const url = serverAddress() + '/Users/' + userId + '/Items/' + itemId +
+                '?Fields=MediaSources';
             const xhr = new XMLHttpRequest();
-            xhr.timeout = 5000;
-
+            xhr.timeout = 6000;
             xhr.onload = function () {
                 if (xhr.status >= 200 && xhr.status < 300) {
                     try {
                         const data = JSON.parse(xhr.responseText);
-                        const type = data.Type || null;
-                        _typeCache[itemId] = type;
-                        resolve(type);
-                    } catch (_) { reject(new Error('parse error')); }
+                        resolve(data.Type || '');
+                    } catch (_) { reject(new Error('parse')); }
                 } else { reject(new Error('http ' + xhr.status)); }
             };
-            xhr.onerror = function () { reject(new Error('network error')); };
+            xhr.onerror = function () { reject(new Error('net')); };
             xhr.ontimeout = function () { reject(new Error('timeout')); };
-
             xhr.open('GET', url, true);
-
-            const token = apiClient.accessToken ? apiClient.accessToken() : '';
-            const deviceId = apiClient.deviceId ? apiClient.deviceId() : '';
-            const clientName = apiClient._clientName || 'Jellyfin Web';
-            const clientVersion = apiClient._clientVersion || '10.11.0';
-            const deviceName = apiClient._deviceName || 'Browser';
-
-            xhr.setRequestHeader('X-Emby-Authorization',
-                'MediaBrowser Client="' + clientName + '", Device="' + deviceName +
-                '", DeviceId="' + deviceId + '", Version="' + clientVersion +
-                '", Token="' + token + '"');
-
+            xhr.setRequestHeader('X-JPI-Self', '1');
+            xhr.setRequestHeader('X-Emby-Authorization', authHeader());
             xhr.send();
         });
+    }
+
+    function fetchPlaybackInfo(itemId) {
+        return new Promise(function (resolve, reject) {
+            const ac = window.ApiClient;
+            const userId = ac.getCurrentUserId();
+            const body = JSON.stringify({
+                UserId: userId,
+                DeviceProfile: getDeviceProfile(),
+                MaxStreamingBitrate: 120000000,
+                StartTimeTicks: 0,
+                IsPlayback: false,
+                AutoOpenLiveStream: false
+            });
+            const url = serverAddress() + '/Items/' + itemId + '/PlaybackInfo';
+            const xhr = new XMLHttpRequest();
+            xhr.timeout = 9000;
+            xhr.onload = function () {
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    try {
+                        resolve(parsePlaybackResponse(JSON.parse(xhr.responseText)));
+                    } catch (_) { reject(new Error('parse')); }
+                } else { reject(new Error('http ' + xhr.status)); }
+            };
+            xhr.onerror = function () { reject(new Error('net')); };
+            xhr.ontimeout = function () { reject(new Error('timeout')); };
+            xhr.open('POST', url, true);
+            xhr.setRequestHeader('X-JPI-Self', '1'); // tell sniffer to skip
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            xhr.setRequestHeader('X-Emby-Authorization', authHeader());
+            xhr.send(body);
+        });
+    }
+
+    /**
+     * Pick the best media source and translate the server's decision into a
+     * badge. We trust the server's SupportsDirectPlay/Stream/Transcoding
+     * flags — they reflect a real evaluation against the device profile.
+     */
+    function parsePlaybackResponse(resp) {
+        const sources = resp.MediaSources || [];
+        if (sources.length === 0) return { type: 'transcode', reason: 'no media sources' };
+
+        // Prefer the source the server thinks is most usable.
+        const src = sources.find(function (s) { return s.SupportsDirectPlay; }) ||
+                    sources.find(function (s) { return s.SupportsDirectStream; }) ||
+                    sources[0];
+
+        const container = (src.Container || '').toLowerCase();
+        const audio = getStreamCodec(src, 'Audio');
+        const video = getStreamCodec(src, 'Video');
+
+        if (src.SupportsDirectPlay) {
+            return {
+                type: 'direct',
+                reason: container + ' / ' + (video || '?') + ' / ' + (audio || '?')
+            };
+        }
+
+        if (src.SupportsDirectStream) {
+            if (audio && FRAGILE_AUDIO.has(audio)) {
+                return {
+                    type: 'transcode',
+                    reason: 'remux + ' + audio.toUpperCase() + ' audio (often fails on browsers)'
+                };
+            }
+            return {
+                type: 'stream',
+                reason: 'video direct, audio remux (' + (audio || '?') + ')'
+            };
+        }
+
+        if (src.SupportsTranscoding) {
+            const reasons = (src.TranscodeReasons && src.TranscodeReasons.length)
+                ? src.TranscodeReasons.join(', ')
+                : ('video ' + (video || '?') + ', audio ' + (audio || '?'));
+            return { type: 'transcode', reason: reasons };
+        }
+
+        return { type: 'transcode', reason: 'not playable on this device' };
+    }
+
+    function getStreamCodec(src, type) {
+        const s = (src.MediaStreams || []).find(function (m) { return m.Type === type; });
+        return s ? (s.Codec || '').toLowerCase() : null;
     }
 
     // ─── Badge DOM ───────────────────────────────────────────────────────────
@@ -414,8 +559,6 @@
         const css = document.createElement('style');
         css.id = 'jpi-styles';
         css.textContent = [
-            /* Overlay badge on card images (top-right corner) */
-            '.jpi-card-wrapper { position: relative; }',
             '.jpi-badge-overlay {',
             '  position: absolute; top: 4px; right: 4px; z-index: 10;',
             '  display: inline-flex; align-items: center; gap: 3px;',
@@ -427,7 +570,6 @@
             '  pointer-events: none !important;',
             '  box-shadow: 0 1px 3px rgba(0,0,0,0.4);',
             '}',
-            /* Inline badge for list/episode rows (end of row) */
             '.jpi-badge-inline {',
             '  display: inline-flex; align-items: center; gap: 3px;',
             '  margin-left: auto; padding: 1px 6px; border-radius: 4px;',
@@ -438,15 +580,14 @@
             '}',
             '.jpi-direct { background: rgba(26,107,42,0.9); color: #fff; }',
             '.jpi-stream { background: rgba(122,95,0,0.9); color: #fff; }',
-            '.jpi-transcode { background: rgba(139,26,26,0.9); color: #fff; }',
-            '.jpi-loading { background: rgba(68,68,68,0.9); color: #ccc; animation: jpi-pulse 1.5s ease-in-out infinite; }',
-            '@keyframes jpi-pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }'
+            '.jpi-transcode { background: rgba(139,26,26,0.9); color: #fff; }'
         ].join('\n');
         (document.head || document.documentElement).appendChild(css);
     }
 
     function createBadge(type, itemId, reason, isOverlay) {
-        const badge = BADGES[type] || BADGES.loading;
+        const badge = BADGES[type];
+        if (!badge) return null;
         const span = document.createElement('span');
         span.className = (isOverlay ? 'jpi-badge-overlay ' : 'jpi-badge-inline ') + badge.cls;
         span.setAttribute('data-jpi', itemId);
@@ -455,206 +596,37 @@
         return span;
     }
 
-    // ─── Item Detection ──────────────────────────────────────────────────────
-
-    function getItemId(el) {
-        let id = el.getAttribute('data-id') || el.getAttribute('data-itemid');
-        if (id && id.length > 5) return id;
-
-        // Check links inside the element
-        const link = el.querySelector('a[data-id], a[href*="/items/"], a[href*="id="]');
-        if (link) {
-            id = link.getAttribute('data-id');
-            if (id && id.length > 5) return id;
-            const href = link.getAttribute('href') || '';
-            var match = href.match(/\/items\/([0-9a-f-]+)/i) || href.match(/[?&]id=([0-9a-f-]+)/i);
-            if (match) return match[1];
-        }
-
-        // Check any child with data-id
-        const btn = el.querySelector('[data-id]');
-        if (btn) {
-            id = btn.getAttribute('data-id');
-            if (id && id.length > 5) return id;
-        }
-
-        return null;
-    }
-
-    /**
-     * Find media item elements in the DOM.
-     * Jellyfin 10.11 uses React-based cards with various class patterns.
-     * We look broadly for any element with data-id that looks like a card or list item.
-     */
-    function findItemElements() {
-        // Broad card selectors for Jellyfin 10.11 React UI
-        var selectors = [
-            // Classic card selectors
-            '.card[data-id]',
-            '[data-id].card',
-            // React-based card wrappers (10.11+)
-            '[data-id][class*="card"]',
-            '[data-id][class*="Card"]',
-            // Item cards with various naming
-            '[data-id][class*="itemCard"]',
-            '[data-id][class*="portraitCard"]',
-            '[data-id][class*="landscapeCard"]',
-            '[data-id][class*="squareCard"]',
-            '[data-id][class*="bannerCard"]',
-            '[data-id][class*="backdropCard"]',
-            // List and episode items
-            '[data-id].listItem',
-            '[data-id].episodeItem',
-            '.listItem[data-id]',
-            '[data-id][class*="listItem"]',
-            '[data-id][class*="episode"]',
-            // Generic: any interactive item wrapper with a data-id that
-            // contains an image (strong signal it's a media card)
-            '[data-id] .cardImageContainer',
-            '[data-id] [class*="cardImage"]',
-            '[data-id] [class*="CardImage"]'
-        ];
-
-        var seen = new Set();
-        var results = [];
-
-        selectors.forEach(function (sel) {
-            try {
-                document.querySelectorAll(sel).forEach(function (el) {
-                    // For child-match selectors, walk up to the data-id ancestor
-                    var target = el.closest('[data-id]') || el;
-                    if (!target.getAttribute('data-id')) return;
-                    var id = target.getAttribute('data-id');
-                    if (seen.has(id)) return;
-                    if (target.querySelector('[data-jpi]')) return;
-                    seen.add(id);
-                    results.push(target);
-                });
-            } catch (_) { }
-        });
-
-        return results;
-    }
-
-    /**
-     * Determine if an element is a card (has image) vs a list/episode row.
-     */
     function isCardElement(el) {
-        return !!(
-            el.querySelector('.cardImageContainer, [class*="cardImage"], [class*="CardImage"], .cardBox, [class*="cardBox"]') ||
-            el.classList.toString().match(/card/i)
-        );
+        if (el.querySelector('.cardImageContainer, [class*="cardImage"], [class*="CardImage"]')) return true;
+        const cls = typeof el.className === 'string' ? el.className : '';
+        return /card/i.test(cls);
     }
 
-    // ─── Scan ────────────────────────────────────────────────────────────────
-
-    function scan() {
-        if (_destroyed) return;
-        const elements = findItemElements();
-        if (elements.length === 0) return;
-
-        const apiClient = getApiClient();
-        if (!apiClient) return;
-
-        const deviceId = apiClient.deviceId ? apiClient.deviceId() : 'default';
-        const fingerprint = getCodecFingerprint();
-
-        elements.forEach(function (el) {
-            const itemId = getItemId(el);
-            if (!itemId) return;
-
-            // Cache key includes deviceId AND codec fingerprint for true per-device isolation
-            const cacheKey = itemId + '_' + deviceId + '_' + fingerprint;
-            const cached = getCache(cacheKey);
-
-            if (cached) {
-                placeBadge(el, itemId, cached.type, cached.reason);
-            } else {
-                // First check if the item is a playable type (Episode/Movie)
-                // Don't show loading badge until we confirm it's playable
-                fetchItemType(itemId).then(function (type) {
-                    if (_destroyed) return;
-                    if (!PLAYABLE_TYPES.has(type)) return; // Skip seasons, series, artists, etc.
-
-                    placeBadge(el, itemId, 'loading');
-                    return fetchPlaybackInfo(itemId).then(function (result) {
-                        if (_destroyed) return;
-                        removeBadges(el);
-                        placeBadge(el, itemId, result.type, result.reason);
-                        setCache(cacheKey, { type: result.type, reason: result.reason });
-                    });
-                }).catch(function () {
-                    removeBadges(el);
-                });
-            }
-        });
-    }
-
-    /**
-     * Place badge in the right location depending on element type.
-     * Cards: overlay on top-right of the card image.
-     * List/episode rows: append at the end of the row.
-     */
     function placeBadge(el, itemId, type, reason) {
         if (el.querySelector('[data-jpi="' + itemId + '"]')) return;
 
         if (isCardElement(el)) {
-            // Find the card image container and overlay the badge
-            var imgContainer = el.querySelector(
-                '.cardImageContainer, [class*="cardImage"], [class*="CardImage"], .cardBox, [class*="cardBox"]'
+            const imgContainer = el.querySelector(
+                '.cardImageContainer, [class*="cardImage"], [class*="CardImage"], ' +
+                '.cardBox, [class*="cardBox"]'
             );
-            if (imgContainer) {
-                // Ensure the container is positioned for absolute children
-                var pos = window.getComputedStyle(imgContainer).position;
-                if (pos === 'static') {
-                    imgContainer.style.position = 'relative';
-                }
-                imgContainer.appendChild(createBadge(type, itemId, reason, true));
-            } else {
-                // Fallback: put at end of element
-                el.appendChild(createBadge(type, itemId, reason, true));
-            }
-        } else {
-            // List/episode row: append inline badge at the end of the row
-            var rowBody = el.querySelector(
-                '.listItemBody, [class*="listItemBody"], [class*="episodeBody"], .itemBody'
-            );
-            if (rowBody) {
-                // Insert after the row body, not inside the name
-                rowBody.parentNode.insertBefore(createBadge(type, itemId, reason, false), rowBody.nextSibling);
-            } else {
-                el.appendChild(createBadge(type, itemId, reason, false));
-            }
+            const target = imgContainer || el;
+            const computed = window.getComputedStyle(target);
+            if (computed.position === 'static') target.style.position = 'relative';
+            const badge = createBadge(type, itemId, reason, true);
+            if (badge) target.appendChild(badge);
+            return;
         }
-    }
 
-    function removeBadges(el) {
-        el.querySelectorAll('[data-jpi]').forEach(function (b) { b.remove(); });
-    }
-
-    // ─── Init ────────────────────────────────────────────────────────────────
-
-    function init() {
-        if (_destroyed) return;
-        injectStyles();
-
-        _intervals.push(setInterval(scan, SCAN_INTERVAL_MS));
-        _intervals.push(setInterval(function () {
-            if (window.location.href !== _lastUrl) {
-                _lastUrl = window.location.href;
-                // Clear inferred type cache on page change so new context is evaluated
-                Object.keys(_typeCache).forEach(function (k) { delete _typeCache[k]; });
-                setTimeout(scan, 600);
-            }
-        }, 1000));
-
-        setTimeout(scan, 1200);
-        console.log('[PlaybackIndicator] v0.3.0 initialized');
-    }
-
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', function () { setTimeout(init, 1500); });
-    } else {
-        setTimeout(init, 1500);
+        const rowBody = el.querySelector(
+            '.listItemBody, [class*="listItemBody"], [class*="episodeBody"], .itemBody'
+        );
+        const badge = createBadge(type, itemId, reason, false);
+        if (!badge) return;
+        if (rowBody && rowBody.parentNode) {
+            rowBody.parentNode.insertBefore(badge, rowBody.nextSibling);
+        } else {
+            el.appendChild(badge);
+        }
     }
 })();

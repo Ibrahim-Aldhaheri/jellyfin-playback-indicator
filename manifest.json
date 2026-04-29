@@ -4,17 +4,17 @@
     "name": "Playback Indicator",
     "overview": "Shows direct-play / transcode status badges on episode and movie rows in the Jellyfin web UI.",
     "description": "A Jellyfin plugin that automatically calculates whether each episode or movie can direct-play on your current device, and shows a colored badge in the web UI. Badges are calculated using your device's actual playback profile — no manual configuration required.",
-    "owner": "badr-abokhalil-dev",
+    "owner": "Ibrahim-Aldhaheri",
     "category": "General",
-    "imageUrl": "https://raw.githubusercontent.com/badr-abokhalil-dev/jellyfin-playback-indicator/main/icon.png",
+    "imageUrl": "https://raw.githubusercontent.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/main/icon.png",
     "versions": [
       {
-        "changelog": "Initial release: direct-play and transcode badges on episode/movie rows",
+        "changelog": "Accuracy + stability rewrite: capture real player device profile, drop polling for MutationObserver, never paint badges on non-playable items, atomic index.html writes, no-store script cache headers, robust uninstall.",
         "targetAbi": "10.11.0",
-        "version": "1.0.0.0",
-        "sourceUrl": "https://github.com/badr-abokhalil-dev/jellyfin-playback-indicator/releases/download/1.0.0.0/Jellyfin.Plugin.PlaybackIndicator_10.11.0.zip",
-        "checksum": "",
-        "timestamp": "2026-04-13"
+        "version": "0.4.0.0",
+        "sourceUrl": "https://github.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/releases/download/0.4.0.0/Jellyfin.Plugin.PlaybackIndicator_0.4.0.0.zip",
+        "checksum": "66c02baa99f3b6829b8a8b9d40ae1cc8",
+        "timestamp": "2026-04-29"
       }
     ]
   }
