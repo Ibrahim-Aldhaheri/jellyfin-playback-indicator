@@ -9,6 +9,14 @@
     "imageUrl": "https://raw.githubusercontent.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/main/icon.png",
     "versions": [
       {
+        "changelog": "Fix Jellyfin Media Player / Android still showing everything as Transcode after 0.4.3. Pull the device profile directly from window.NativeShell.AppHost.getDeviceProfile() before falling back to /Sessions — that's the same call jellyfin-web uses to start playback in JMP/Android, so predictions match exactly. Also detect native-shell via ApiClient._clientName as a backup when window.NativeShell loads after our boot.",
+        "targetAbi": "10.11.0",
+        "version": "0.4.4.0",
+        "sourceUrl": "https://github.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/releases/download/0.4.4.0/Jellyfin.Plugin.PlaybackIndicator_0.4.4.0.zip",
+        "checksum": "0781c2a38f3905f977df5b495b51be8b",
+        "timestamp": "2026-04-30"
+      },
+      {
         "changelog": "Fix Direct Stream items mis-marked as Transcode and Jellyfin Media Player / Android Native Shell showing everything as Transcode. Session profile lookup now checks both session.DeviceProfile and session.Capabilities.DeviceProfile (different clients use different paths) and prefers the session whose DeviceId matches ours. Synthetic fallback detects native-shell environments (window.NativeShell or JMP/Android UA) and emits a permissive profile because canPlayType() doesn't reflect mpv/ExoPlayer capability. Console now logs which profile source is in use.",
         "targetAbi": "10.11.0",
         "version": "0.4.3.0",

@@ -1,5 +1,5 @@
 /**
- * Jellyfin Playback Indicator v0.4.3
+ * Jellyfin Playback Indicator v0.4.4
  *
  * Shows Direct Play / Direct Stream / Transcode badges for episodes and movies.
  *
@@ -8,21 +8,23 @@
  *  ❌ Transcode     — server has to transcode video and/or audio
  *
  * Accuracy strategy (in order of preference):
- *   1. Pre-fetch the active session's DeviceProfile via GET /Sessions on
- *      startup — Jellyfin web / JMP / Android post their full profile when
- *      the session opens so this is accurate immediately. Both top-level
- *      `session.DeviceProfile` and `session.Capabilities.DeviceProfile` are
- *      checked since different clients use different paths.
- *   2. Sniff outgoing real player calls (XHR + fetch) to /Items/{id}/PlaybackInfo
- *      and capture any richer profile they send.
- *   3. Synthetic profile as a last resort. Native-shell environments (JMP,
- *      Android, etc.) get a maximal profile; browsers get a profile derived
- *      from canPlayType().
+ *   1. Native shell. JMP and Android inject window.NativeShell.AppHost
+ *      whose getDeviceProfile() returns the *exact* profile the native
+ *      player would use. This is the same call jellyfin-web itself uses
+ *      when starting playback in those shells.
+ *   2. Pre-fetch the active session's DeviceProfile via GET /Sessions.
+ *      Both top-level `session.DeviceProfile` and
+ *      `session.Capabilities.DeviceProfile` are checked since different
+ *      clients use different paths; the session matching our DeviceId is
+ *      preferred when several are active.
+ *   3. Sniff outgoing real player calls (XHR + fetch) to
+ *      /Items/{id}/PlaybackInfo and capture any richer profile they send.
+ *   4. Synthetic profile as a last resort.
  */
 (function () {
     'use strict';
 
-    const VERSION = '0.4.3';
+    const VERSION = '0.4.4';
 
     const RESULT_PREFIX = 'jpi_v4_';
     const TYPE_PREFIX = 'jpi_type_';
@@ -93,10 +95,20 @@
         if (destroyed) return;
         injectStyles();
 
-        // Pull the active session's DeviceProfile right away so predictions are
-        // accurate from the first scan (no need to wait for a real play).
-        fetchSessionProfile().then(function (profile) {
-            if (profile) persistProfile(profile);
+        // Race the two reliable profile sources. NativeShell is preferred
+        // because in JMP / Android it returns the actual profile the native
+        // player would use; the /Sessions fallback covers the browser case.
+        getNativeShellProfile().then(function (nsProfile) {
+            if (nsProfile) {
+                console.info('[PlaybackIndicator] using device profile from NativeShell.AppHost: ' +
+                    (nsProfile.Name || '(unnamed)') +
+                    ' (' + (nsProfile.DirectPlayProfiles || []).length + ' direct-play entries)');
+                persistProfile(nsProfile);
+                return;
+            }
+            return fetchSessionProfile().then(function (profile) {
+                if (profile) persistProfile(profile);
+            });
         });
 
         observer = new MutationObserver(function (mutations) {
@@ -280,6 +292,41 @@
     }
 
     /**
+     * Ask the native shell directly. JMP and Android inject
+     * window.NativeShell.AppHost.getDeviceProfile() which returns the exact
+     * DeviceProfile their native player handles — same call jellyfin-web
+     * uses when it actually starts playback in those environments.
+     *
+     * Some implementations return synchronously, others a Promise. Some take
+     * an `item` argument for context-dependent decisions; calling without
+     * one yields a generic profile that's correct for our prediction use.
+     */
+    function getNativeShellProfile() {
+        return new Promise(function (resolve) {
+            try {
+                const ns = window.NativeShell;
+                const ah = ns && ns.AppHost;
+                const fn = ah && typeof ah.getDeviceProfile === 'function'
+                    ? ah.getDeviceProfile.bind(ah) : null;
+                if (!fn) { resolve(null); return; }
+                let result;
+                try { result = fn(); }
+                catch (_) { try { result = fn(null); } catch (__) { result = null; } }
+                if (result && typeof result.then === 'function') {
+                    result.then(function (p) { resolve(isUsableProfile(p) ? p : null); },
+                                function () { resolve(null); });
+                } else {
+                    resolve(isUsableProfile(result) ? result : null);
+                }
+            } catch (_) { resolve(null); }
+        });
+    }
+
+    function isUsableProfile(p) {
+        return p && Array.isArray(p.DirectPlayProfiles) && p.DirectPlayProfiles.length >= 1;
+    }
+
+    /**
      * Pre-fetch the device profile from the active session. Jellyfin web /
      * JMP / Android all POST their full DeviceProfile when the session opens,
      * so this gives us an accurate profile right away.
@@ -376,9 +423,17 @@
     function isNativeShell() {
         if (window.NativeShell) return true;
         const ua = (navigator.userAgent || '').toLowerCase();
-        return ua.indexOf('jellyfin-media-player') !== -1 ||
+        if (ua.indexOf('jellyfin-media-player') !== -1 ||
             ua.indexOf('jellyfinmediaplayer') !== -1 ||
-            ua.indexOf('jellyfinandroid') !== -1;
+            ua.indexOf('jellyfinandroid') !== -1) return true;
+        try {
+            const ac = window.ApiClient;
+            const name = ((ac && ac._clientName) || '').toLowerCase();
+            if (/jellyfin\s*media\s*player|jellyfin.?mobile|jellyfin.?android|mpv\s*shim/.test(name)) {
+                return true;
+            }
+        } catch (_) {}
+        return false;
     }
 
     /**
