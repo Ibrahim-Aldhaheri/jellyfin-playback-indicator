@@ -1,5 +1,5 @@
 /**
- * Jellyfin Playback Indicator v0.4.4
+ * Jellyfin Playback Indicator v0.4.5
  *
  * Shows Direct Play / Direct Stream / Transcode badges for episodes and movies.
  *
@@ -24,7 +24,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.4.4';
+    const VERSION = '0.4.5';
 
     const RESULT_PREFIX = 'jpi_v4_';
     const TYPE_PREFIX = 'jpi_type_';
@@ -861,7 +861,7 @@
         css.id = 'jpi-styles';
         css.textContent = [
             '.jpi-badge-overlay {',
-            '  position: absolute; top: 4px; right: 4px; z-index: 10;',
+            '  position: absolute; top: 4px; left: 4px; z-index: 10;',
             '  display: inline-flex; align-items: center; gap: 3px;',
             '  padding: 2px 6px; border-radius: 4px;',
             '  font-size: 10px; font-weight: 700; line-height: 1.3;',
