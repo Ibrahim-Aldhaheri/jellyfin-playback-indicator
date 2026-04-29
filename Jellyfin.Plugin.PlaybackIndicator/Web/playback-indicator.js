@@ -1,5 +1,5 @@
 /**
- * Jellyfin Playback Indicator v0.4.1
+ * Jellyfin Playback Indicator v0.4.2
  *
  * Shows Direct Play / Direct Stream / Transcode badges for episodes and movies.
  *
@@ -7,20 +7,26 @@
  *  ⚠️ Direct Stream — video plays natively, audio gets remuxed
  *  ❌ Transcode     — server has to transcode video and/or audio
  *
- * Accuracy strategy: instead of inventing a synthetic device profile, we
- * intercept the real Jellyfin web client when it actually starts playback,
- * capture the DeviceProfile it sends, and reuse THAT for our prediction
- * calls. This guarantees our prediction matches what playback would do.
+ * Accuracy strategy (in order of preference):
+ *   1. Pre-fetch the active session's DeviceProfile via GET /Sessions on
+ *      startup — Jellyfin web posts its full profile when the session opens
+ *      so this is accurate immediately.
+ *   2. Sniff outgoing real player calls (XHR + fetch) to /Items/{id}/PlaybackInfo
+ *      and capture any richer profile they send.
+ *   3. Permissive synthetic profile (mp4, mkv, ts, webm) as the last resort.
  */
 (function () {
     'use strict';
 
-    const VERSION = '0.4.1';
+    const VERSION = '0.4.2';
 
-    const RESULT_PREFIX = 'jpi_v3_';
+    const RESULT_PREFIX = 'jpi_v4_';
     const TYPE_PREFIX = 'jpi_type_';
     const PROFILE_KEY = 'jpi_profile';
-    const ALL_PREFIXES = ['jpi_v2_', 'jpi_v3_', 'jpi_type_', 'jpi_profile', 'jpi_real_profile'];
+    const ALL_PREFIXES = [
+        'jpi_v2_', 'jpi_v3_', 'jpi_v4_',
+        'jpi_type_', 'jpi_profile', 'jpi_real_profile'
+    ];
 
     const RESULT_TTL_MS = 60 * 60 * 1000;
     const TYPE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -82,6 +88,12 @@
     function start() {
         if (destroyed) return;
         injectStyles();
+
+        // Pull the active session's DeviceProfile right away so predictions are
+        // accurate from the first scan (no need to wait for a real play).
+        fetchSessionProfile().then(function (profile) {
+            if (profile) persistProfile(profile);
+        });
 
         observer = new MutationObserver(function (mutations) {
             for (let i = 0; i < mutations.length; i++) {
@@ -149,11 +161,15 @@
     // ─── Device profile sniffer ──────────────────────────────────────────────
 
     /**
-     * Hook XMLHttpRequest. When the real Jellyfin web client posts to
-     * /Items/{id}/PlaybackInfo with a DeviceProfile, capture that profile and
-     * persist it. Skip our own calls (marked via X-JPI-Self header).
+     * Hook XMLHttpRequest AND fetch. When the real Jellyfin web client posts
+     * to /Items/{id}/PlaybackInfo with a DeviceProfile, capture that profile.
+     * Our own calls are marked with the X-JPI-Self header and skipped.
      */
     function installProfileSniffer() {
+        const isPlaybackUrl = function (u) {
+            return u && /\/Items\/[A-Fa-f0-9-]+\/PlaybackInfo/.test(u);
+        };
+
         try {
             const origOpen = XMLHttpRequest.prototype.open;
             const origSend = XMLHttpRequest.prototype.send;
@@ -176,29 +192,133 @@
             XMLHttpRequest.prototype.send = function (body) {
                 if (!this.__jpiSelf && this.__jpiMethod &&
                     this.__jpiMethod.toUpperCase() === 'POST' &&
-                    /\/Items\/[A-Fa-f0-9-]+\/PlaybackInfo/.test(this.__jpiUrl || '')) {
-                    try {
-                        const parsed = typeof body === 'string' ? JSON.parse(body) : null;
-                        const dp = parsed && parsed.DeviceProfile;
-                        // Real player profiles are rich (subtitle profiles, codec profiles,
-                        // dozens of direct-play entries). Use that as our signal.
-                        if (dp && Array.isArray(dp.DirectPlayProfiles) &&
-                            dp.DirectPlayProfiles.length >= 3) {
-                            try {
-                                localStorage.setItem(PROFILE_KEY, JSON.stringify({
-                                    profile: dp, captured: Date.now()
-                                }));
-                            } catch (_) {}
-                        }
-                    } catch (_) {}
+                    isPlaybackUrl(this.__jpiUrl)) {
+                    captureProfileFromBody(body);
                 }
                 return origSend.apply(this, arguments);
             };
         } catch (_) {}
+
+        if (typeof window.fetch === 'function') {
+            try {
+                const origFetch = window.fetch.bind(window);
+                window.fetch = function (input, init) {
+                    try {
+                        const url = typeof input === 'string' ? input : (input && input.url) || '';
+                        const method = ((init && init.method) || (input && input.method) || 'GET').toUpperCase();
+                        const isSelf = headerLookup(init && init.headers, 'X-JPI-Self') === '1' ||
+                                       headerLookup(input && input.headers, 'X-JPI-Self') === '1';
+                        if (!isSelf && method === 'POST' && isPlaybackUrl(url)) {
+                            captureProfileFromBody(init && init.body);
+                        }
+                    } catch (_) {}
+                    return origFetch(input, init);
+                };
+            } catch (_) {}
+        }
+    }
+
+    function headerLookup(h, name) {
+        if (!h) return null;
+        try {
+            if (typeof h.get === 'function') return h.get(name);
+            // Plain object — case-insensitive lookup
+            const lower = name.toLowerCase();
+            const keys = Object.keys(h);
+            for (let i = 0; i < keys.length; i++) {
+                if (keys[i].toLowerCase() === lower) return h[keys[i]];
+            }
+        } catch (_) {}
+        return null;
+    }
+
+    function captureProfileFromBody(body) {
+        try {
+            const parsed = typeof body === 'string' ? JSON.parse(body) : null;
+            const dp = parsed && parsed.DeviceProfile;
+            if (!dp || !Array.isArray(dp.DirectPlayProfiles) || dp.DirectPlayProfiles.length < 1) return;
+            // Real player profiles tend to be richer than ours; reject only if
+            // it looks suspiciously like our own synthetic.
+            if (dp.Name === 'PlaybackIndicator Synthetic') return;
+            persistProfile(dp);
+        } catch (_) {}
+    }
+
+    /**
+     * Save profile to localStorage and invalidate result cache if the profile
+     * has actually changed (so old wrong predictions don't stick around).
+     */
+    function persistProfile(profile) {
+        try {
+            const stored = JSON.stringify({ profile: profile, captured: Date.now() });
+            const existing = localStorage.getItem(PROFILE_KEY);
+            const existingProfileStr = existing ? JSON.stringify(JSON.parse(existing).profile) : '';
+            const newProfileStr = JSON.stringify(profile);
+            localStorage.setItem(PROFILE_KEY, stored);
+            if (existingProfileStr !== newProfileStr) {
+                invalidateResultCache();
+                scheduleScan(SCAN_DEBOUNCE_MS);
+            }
+        } catch (_) {}
+    }
+
+    function invalidateResultCache() {
+        try {
+            const keys = Object.keys(localStorage);
+            for (let i = 0; i < keys.length; i++) {
+                if (keys[i].indexOf(RESULT_PREFIX) === 0) localStorage.removeItem(keys[i]);
+            }
+        } catch (_) {}
+        // Drop in-flight lookups too — they were issued with the old profile.
+        inflight.clear();
+        lookupQueue.length = 0;
+        document.querySelectorAll('[data-jpi]').forEach(function (b) { b.remove(); });
+    }
+
+    /**
+     * Pre-fetch the device profile from the active session. Jellyfin web posts
+     * its full DeviceProfile when the session opens, so this gives us an
+     * accurate profile right away — no waiting for a real play.
+     */
+    function fetchSessionProfile() {
+        return new Promise(function (resolve) {
+            try {
+                const ac = window.ApiClient;
+                if (!ac) { resolve(null); return; }
+                const deviceId = (ac.deviceId && ac.deviceId()) || '';
+                const url = serverAddress() + '/Sessions?DeviceId=' + encodeURIComponent(deviceId);
+                const xhr = new XMLHttpRequest();
+                xhr.timeout = 6000;
+                xhr.onload = function () {
+                    try {
+                        if (xhr.status >= 200 && xhr.status < 300) {
+                            const sessions = JSON.parse(xhr.responseText);
+                            if (Array.isArray(sessions)) {
+                                for (let i = 0; i < sessions.length; i++) {
+                                    const cap = sessions[i] && sessions[i].Capabilities;
+                                    const dp = cap && cap.DeviceProfile;
+                                    if (dp && Array.isArray(dp.DirectPlayProfiles) &&
+                                        dp.DirectPlayProfiles.length >= 1) {
+                                        resolve(dp);
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    } catch (_) {}
+                    resolve(null);
+                };
+                xhr.onerror = function () { resolve(null); };
+                xhr.ontimeout = function () { resolve(null); };
+                xhr.open('GET', url, true);
+                xhr.setRequestHeader('X-JPI-Self', '1');
+                xhr.setRequestHeader('X-Emby-Authorization', authHeader());
+                xhr.send();
+            } catch (_) { resolve(null); }
+        });
     }
 
     function getDeviceProfile() {
-        // Prefer a profile captured from a real play.
         try {
             const raw = localStorage.getItem(PROFILE_KEY);
             if (raw) {
@@ -212,36 +332,42 @@
     }
 
     /**
-     * Permissive fallback profile. Used until the real player makes its first
-     * call. Errs toward "transcode" rather than falsely promising direct-play.
+     * Permissive fallback profile. Used until we can pull the real one from
+     * the active session or sniff one from a real play. Includes the
+     * containers Jellyfin web actually direct-plays (mkv via MSE, ts, mp4,
+     * webm) so MKV libraries don't all show up as Transcode by default.
      */
     function buildSyntheticProfile() {
         const v = document.createElement('video');
         const cp = function (t) { try { return v.canPlayType(t); } catch (_) { return ''; } };
-
         const has = function (t) { return cp(t) !== ''; };
 
-        const vCodecs = [];
-        if (has('video/mp4; codecs="avc1.42E01E"')) vCodecs.push('h264');
-        if (has('video/mp4; codecs="hvc1"') || has('video/mp4; codecs="hev1"')) vCodecs.push('hevc', 'h265');
-        if (has('video/webm; codecs="vp9"')) vCodecs.push('vp9');
-        if (has('video/mp4; codecs="av01.0.01M.08"')) vCodecs.push('av1');
+        const supportsHevc = has('video/mp4; codecs="hvc1"') || has('video/mp4; codecs="hev1"');
+        const supportsVP9 = has('video/webm; codecs="vp9"');
+        const supportsAV1 = has('video/mp4; codecs="av01.0.01M.08"');
+        const supportsAC3 = has('audio/mp4; codecs="ac-3"') || has('audio/ac3');
 
-        const aCodecs = ['aac'];
-        if (has('audio/mp4; codecs="ac-3"') || has('audio/ac3')) aCodecs.push('ac3', 'eac3');
-        if (has('audio/webm; codecs="opus"')) aCodecs.push('opus');
-        if (has('audio/mpeg')) aCodecs.push('mp3');
-        if (has('audio/flac')) aCodecs.push('flac');
+        const videoCodecs = ['h264', 'vp8'];
+        if (supportsHevc) videoCodecs.push('hevc', 'h265');
+        if (supportsVP9) videoCodecs.push('vp9');
+        if (supportsAV1) videoCodecs.push('av1');
+
+        const audioCodecs = ['aac', 'mp3', 'opus', 'flac', 'vorbis'];
+        if (supportsAC3) audioCodecs.push('ac3', 'eac3');
 
         return {
             Name: 'PlaybackIndicator Synthetic',
             MaxStreamingBitrate: 120000000,
             MaxStaticBitrate: 120000000,
             DirectPlayProfiles: [
-                { Container: 'mp4,m4v,mov', Type: 'Video',
-                  VideoCodec: vCodecs.join(','), AudioCodec: aCodecs.join(',') },
+                { Container: 'mp4,m4v,mov,mkv', Type: 'Video',
+                  VideoCodec: videoCodecs.join(','), AudioCodec: audioCodecs.join(',') },
                 { Container: 'webm', Type: 'Video',
-                  VideoCodec: 'vp9,vp8', AudioCodec: 'opus,vorbis' }
+                  VideoCodec: 'vp8,vp9' + (supportsAV1 ? ',av1' : ''),
+                  AudioCodec: 'opus,vorbis' },
+                { Container: 'ts,mpegts,m2ts', Type: 'Video',
+                  VideoCodec: 'h264' + (supportsHevc ? ',hevc,h265' : ''),
+                  AudioCodec: audioCodecs.join(',') }
             ],
             TranscodingProfiles: [
                 { Container: 'ts', Type: 'Video', VideoCodec: 'h264',
