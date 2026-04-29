@@ -17,14 +17,15 @@ A Jellyfin server plugin that injects direct-play / transcode status badges on e
 
 ## How It Works
 
-The plugin's client-side JavaScript hooks into Jellyfin's SPA router. When you visit a series season page or movie library page, it:
+The plugin's client-side JavaScript watches the DOM via `MutationObserver`. When new media cards or list rows appear, it:
 
-1. Reads the current device playback profile from your active Jellyfin session
-2. For each episode/movie row, calls `POST /Items/{id}/PlaybackInfo` with your device profile
-3. Jellyfin responds with `IsEligibleForDirectPlay` + `TranscodingReasons`
-4. Injects a colored badge next to the item name
+1. Filters out non-playable items (series, seasons, collections, people, etc.) using `data-type` attributes and a cached type lookup
+2. Calls `POST /Items/{id}/PlaybackInfo` for each playable item, using a real device profile
+3. Translates the server's `SupportsDirectPlay` / `SupportsDirectStream` / `SupportsTranscoding` decision into a badge
 
-Badges are cached in `localStorage` keyed by `itemId + deviceId` for 1 hour to avoid hammering the API on every navigation.
+**Device profile accuracy:** instead of inventing a synthetic profile (which the original 0.3.x line did, and which is always wrong in some way), v0.4.0 hooks `XMLHttpRequest` and captures the *real* `DeviceProfile` that the Jellyfin web client sends the first time you actually start playback. Subsequent prediction calls reuse that profile, so the prediction matches what playback would actually do. Until the first real play happens, a permissive synthetic fallback is used.
+
+Results are cached in `localStorage` keyed by `itemId + userId + deviceId + codec-fingerprint` for 1 hour. Item types are cached for 24 hours.
 
 ## Building from Source
 
@@ -54,9 +55,7 @@ Settings are available in **Dashboard → Plugins → Playback Indicator**:
 
 ### A note on Direct Stream detection
 
-Direct Stream detection proved too unreliable to distinguish cleanly from Transcode in many real-world cases — especially with MKV containers and unsupported audio codecs (DTS, TrueHD, etc.). Jellyfin's `SupportsDirectStream` flag can report true even when the result will effectively require transcoding on many devices (phones, TVs, browser players).
-
-Because of this, items that need audio transcoding inside MKV/AVI/OGV/FLV containers are reported as **Transcode** (❌) rather than Direct Stream. This is intentional — it is safer to warn users that transcoding will occur than to falsely promise a Direct Stream that may stutter or fail on their device.
+In v0.3.x the plugin overrode the server's decision for *any* MKV/AVI/OGV/FLV container, marking everything as Transcode. v0.4.0 trusts the server's flags by default and only overrides for audio codecs that genuinely fail in browser players (TrueHD/MLP). DTS and other formats are now reported as the server reports them, since with a real captured device profile the server's decision is accurate.
 
 ## Tech Stack
 
