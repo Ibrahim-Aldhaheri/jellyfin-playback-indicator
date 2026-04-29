@@ -49,9 +49,10 @@ Settings are available in **Dashboard → Plugins → Playback Indicator**:
 
 | Status | Color | Meaning |
 |--------|-------|---------|
-| ✅ Direct Play | Green | Container, video codec, audio codec, subtitles all compatible — no transcoding |
-| ⚠️ Direct Stream | Amber | Video plays natively, but audio needs transcoding (remux) |
-| ❌ Transcode | Red | Video and/or audio needs full transcoding |
+| ✅ Direct Play | Green | File sent as-is — container, video, and audio all native to the device |
+| 🔁 Re-mux | Blue | Container repackaged but video AND audio kept native — lossless, very low CPU on the server |
+| ⚠️ Direct Stream | Amber | Video kept native, audio gets transcoded |
+| ❌ Transcode | Red | Video re-encoded (and possibly audio too); most CPU-expensive |
 
 ### A note on Direct Stream detection
 

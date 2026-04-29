@@ -9,6 +9,14 @@
     "imageUrl": "https://raw.githubusercontent.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/main/icon.png",
     "versions": [
       {
+        "changelog": "Add 🔁 Re-mux badge (blue): items where the container needs repackaging but both video AND audio stay native (lossless, very low CPU). Previously these were lumped under ⚠️ Direct Stream. Splits SupportsDirectStream by checking whether the source audio codec is in the device profile's audio whitelist. Bumped result-cache prefix so old badges get re-evaluated under the new four-way split.",
+        "targetAbi": "10.11.0",
+        "version": "0.4.6.0",
+        "sourceUrl": "https://github.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/releases/download/0.4.6.0/Jellyfin.Plugin.PlaybackIndicator_0.4.6.0.zip",
+        "checksum": "27be62970b6dfac63e1599c124695a36",
+        "timestamp": "2026-04-30"
+      },
+      {
         "changelog": "Move overlay badge from top-right to top-left so it no longer covers Jellyfin's played (watched) checkmark indicator on cards.",
         "targetAbi": "10.11.0",
         "version": "0.4.5.0",

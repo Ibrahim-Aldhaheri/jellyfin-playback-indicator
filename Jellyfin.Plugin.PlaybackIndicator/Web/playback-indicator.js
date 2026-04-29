@@ -1,11 +1,13 @@
 /**
- * Jellyfin Playback Indicator v0.4.5
+ * Jellyfin Playback Indicator v0.4.6
  *
- * Shows Direct Play / Direct Stream / Transcode badges for episodes and movies.
+ * Shows Direct Play / Re-mux / Direct Stream / Transcode badges for items.
  *
- *  ✅ Direct Play   — server says container, video, and audio all play natively
- *  ⚠️ Direct Stream — video plays natively, audio gets remuxed
- *  ❌ Transcode     — server has to transcode video and/or audio
+ *  ✅ Direct Play   — file sent as-is; container, video, audio all native
+ *  🔁 Re-mux        — container repackaged but video AND audio kept native
+ *                     (lossless, very low CPU on the server)
+ *  ⚠️ Direct Stream — container repackaged, video kept native, audio transcoded
+ *  ❌ Transcode     — video re-encoded (and possibly audio too); expensive
  *
  * Accuracy strategy (in order of preference):
  *   1. Native shell. JMP and Android inject window.NativeShell.AppHost
@@ -24,13 +26,13 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.4.5';
+    const VERSION = '0.4.6';
 
-    const RESULT_PREFIX = 'jpi_v4_';
+    const RESULT_PREFIX = 'jpi_v5_';
     const TYPE_PREFIX = 'jpi_type_';
     const PROFILE_KEY = 'jpi_profile';
     const ALL_PREFIXES = [
-        'jpi_v2_', 'jpi_v3_', 'jpi_v4_',
+        'jpi_v2_', 'jpi_v3_', 'jpi_v4_', 'jpi_v5_',
         'jpi_type_', 'jpi_profile', 'jpi_real_profile'
     ];
 
@@ -54,6 +56,7 @@
 
     const BADGES = {
         direct:    { cls: 'jpi-direct',    icon: '✅', label: 'Direct Play' },
+        remux:     { cls: 'jpi-remux',     icon: '🔁', label: 'Re-mux' },
         stream:    { cls: 'jpi-stream',    icon: '⚠️', label: 'Direct Stream' },
         transcode: { cls: 'jpi-transcode', icon: '❌', label: 'Transcode' }
     };
@@ -826,6 +829,21 @@
         }
 
         if (src.SupportsDirectStream) {
+            // SupportsDirectStream covers both Re-mux (container repackaged
+            // but video AND audio kept native — lossless, cheap) and audio-
+            // transcode (video kept native, audio re-encoded). The flag
+            // doesn't distinguish them, so we infer by checking whether the
+            // source audio codec is in the device profile's audio whitelist.
+            const audioNative = audioCodecInProfile(audio, getDeviceProfile());
+
+            if (audioNative) {
+                return {
+                    type: 'remux',
+                    reason: container + ' → playable container; ' +
+                        (video || '?') + ' + ' + (audio || '?') + ' kept native'
+                };
+            }
+
             if (audio && FRAGILE_AUDIO.has(audio)) {
                 return {
                     type: 'transcode',
@@ -834,7 +852,7 @@
             }
             return {
                 type: 'stream',
-                reason: 'video direct, audio remux (' + (audio || '?') + ')'
+                reason: 'video direct, audio transcode (' + (audio || '?') + ')'
             };
         }
 
@@ -851,6 +869,26 @@
     function getStreamCodec(src, type) {
         const s = (src.MediaStreams || []).find(function (m) { return m.Type === type; });
         return s ? (s.Codec || '').toLowerCase() : null;
+    }
+
+    /**
+     * True if `audio` (lower-case codec name) appears in any DirectPlayProfile
+     * audio whitelist of the supplied device profile. Used to distinguish
+     * Re-mux (audio native) from Direct Stream (audio gets transcoded).
+     */
+    function audioCodecInProfile(audio, profile) {
+        if (!audio || !profile) return false;
+        const target = audio.toLowerCase();
+        const profiles = profile.DirectPlayProfiles || [];
+        for (let i = 0; i < profiles.length; i++) {
+            const list = (profiles[i].AudioCodec || '').toLowerCase();
+            if (!list) continue;
+            const codecs = list.split(',');
+            for (let j = 0; j < codecs.length; j++) {
+                if (codecs[j].trim() === target) return true;
+            }
+        }
+        return false;
     }
 
     // ─── Badge DOM ───────────────────────────────────────────────────────────
@@ -880,6 +918,7 @@
             '  pointer-events: none !important;',
             '}',
             '.jpi-direct { background: rgba(26,107,42,0.9); color: #fff; }',
+            '.jpi-remux { background: rgba(40,110,180,0.9); color: #fff; }',
             '.jpi-stream { background: rgba(122,95,0,0.9); color: #fff; }',
             '.jpi-transcode { background: rgba(139,26,26,0.9); color: #fff; }'
         ].join('\n');
