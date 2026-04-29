@@ -1,5 +1,5 @@
 /**
- * Jellyfin Playback Indicator v0.4.0
+ * Jellyfin Playback Indicator v0.4.1
  *
  * Shows Direct Play / Direct Stream / Transcode badges for episodes and movies.
  *
@@ -15,7 +15,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.4.0';
+    const VERSION = '0.4.1';
 
     const RESULT_PREFIX = 'jpi_v3_';
     const TYPE_PREFIX = 'jpi_type_';
@@ -323,11 +323,13 @@
             if (!looksLikeMediaContainer(el)) continue;
             if (el.querySelector('[data-jpi]')) continue;
 
-            // Dedupe: keep the most specific (deepest) match per id.
+            // Dedupe: keep the OUTERMOST container per id. Action buttons,
+            // overlays, and image links inside a card often share the card's
+            // data-id; the badge belongs on the card root, not on those.
             if (seen.has(id)) {
                 const existing = seen.get(id);
-                if (el.contains(existing.el)) continue; // existing is deeper
-                if (existing.el.contains(el)) {
+                if (existing.el.contains(el)) continue; // current is deeper, keep outer
+                if (el.contains(existing.el)) {
                     seen.set(id, { el: el, hint: dataType && PLAYABLE_TYPES.has(dataType) ? dataType : null });
                 }
                 continue;
@@ -338,18 +340,55 @@
     }
 
     function looksLikeMediaContainer(el) {
+        // Buttons and form controls are never card roots, even when their
+        // class names contain "card" (e.g. cardOverlayButton).
+        const tag = el.tagName;
+        if (tag === 'BUTTON' || tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') {
+            return false;
+        }
+
         const cls = (typeof el.className === 'string') ? el.className : '';
-        if (/(card|listItem|episode|itemCard|portraitCard|landscapeCard|squareCard|backdropCard)/i.test(cls)) {
+
+        // Block known action-button / overlay class patterns. These can
+        // contain "card" as a substring but they are NOT the card root.
+        if (/(cardOverlay|paper-icon-button|btnUserData|btnUserItemRating|btn-)/i.test(cls)) {
+            return false;
+        }
+
+        // Allowlist actual card / list-item containers. Use word boundaries on
+        // "card" so cardOverlay/cardOverlayButton don't slip through.
+        if (/(\bcard\b|listItem|episodeItem|itemCard|portraitCard|landscapeCard|squareCard|backdropCard)/i.test(cls)) {
             return true;
         }
+
+        // Last resort: contains a real card image as a descendant.
         return !!el.querySelector(
             '.cardImageContainer, [class*="cardImage"], [class*="CardImage"], ' +
             '.listItemImage, [class*="listItemImage"]'
         );
     }
 
+    /**
+     * Remove badges that ended up in the wrong place — left over from older
+     * builds that placed badges inside action buttons, or stranded inside a
+     * DOM node whose data-id has since been recycled by Jellyfin's
+     * virtualized scroller for a different item.
+     */
+    function sweepStaleBadges() {
+        const badges = document.querySelectorAll('[data-jpi]');
+        for (let i = 0; i < badges.length; i++) {
+            const b = badges[i];
+            if (b.closest('button')) { b.remove(); continue; }
+            const owner = b.closest('[data-id]');
+            if (owner && owner.getAttribute('data-id') !== b.getAttribute('data-jpi')) {
+                b.remove();
+            }
+        }
+    }
+
     function scan() {
         if (destroyed) return;
+        sweepStaleBadges();
         const candidates = findCandidates();
         for (let i = 0; i < candidates.length; i++) {
             processItem(candidates[i].el, candidates[i].el.getAttribute('data-id'), candidates[i].hint);
@@ -603,6 +642,7 @@
     }
 
     function placeBadge(el, itemId, type, reason) {
+        if (el.tagName === 'BUTTON' || el.closest('button')) return;
         if (el.querySelector('[data-jpi="' + itemId + '"]')) return;
 
         if (isCardElement(el)) {
@@ -610,7 +650,9 @@
                 '.cardImageContainer, [class*="cardImage"], [class*="CardImage"], ' +
                 '.cardBox, [class*="cardBox"]'
             );
-            const target = imgContainer || el;
+            // Never place inside an overlay button even if it looks like an
+            // image container.
+            const target = (imgContainer && !imgContainer.closest('button')) ? imgContainer : el;
             const computed = window.getComputedStyle(target);
             if (computed.position === 'static') target.style.position = 'relative';
             const badge = createBadge(type, itemId, reason, true);
