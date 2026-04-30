@@ -1,17 +1,22 @@
+<p align="center">
+  <img src="banner.png" alt="Jellyfin Playback Indicator — Direct Play / Re-mux / Direct Stream / Transcode badges" width="900"/>
+</p>
+
 # Playback Indicator
 
-A Jellyfin server plugin that injects direct-play / transcode status badges on episode and movie rows in the Jellyfin web UI.
+A Jellyfin server plugin that overlays a small badge on every episode and movie card showing *exactly* what the server would do at playback time on your current device — Direct Play, Re-mux, Direct Stream, or Transcode — without you having to press play.
 
 ## Features
 
-- Shows ✅ green badge for direct-play-eligible items
-- Shows ⚠️ amber badge for items that will require transcoding
-- Per-item caching with 1-hour TTL
-- Hooks into Jellyfin's SPA router — survives page navigation
+- ✅ **Direct Play** / 🔁 **Re-mux** / ⚠️ **Direct Stream** / ❌ **Transcode** badges on cards, list rows, and the item details page
+- Predictions match what playback would actually do — uses the **real** device profile (from `window.NativeShell.AppHost` on JMP/Android, or `/Sessions` for browsers), not a synthetic guess
+- Hover any badge for a human-readable reason (e.g. *"video codec hevc not supported"*, *"audio channel count 6ch not supported"*)
+- Per-item caching keyed by user + device + codec capabilities
+- Honors the per-plugin Cache-TTL / Movies / Episodes settings from the dashboard
 
 ## Installation
 
-1. Download the latest release from the [Releases page](https://github.com/badr-abokhalil-dev/jellyfin-playback-indicator/releases)
+1. Download the latest release from the [Releases page](https://github.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/releases)
 2. In Jellyfin Dashboard → Plugins → Catalog → ⚙️ → Install from zip
 3. Restart Jellyfin
 
