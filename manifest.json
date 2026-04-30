@@ -9,6 +9,14 @@
     "imageUrl": "https://raw.githubusercontent.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/main/icon.png",
     "versions": [
       {
+        "changelog": "Re-mux / Direct Stream / Transcode tooltips now explain WHY direct play wasn't possible. The server returns TranscodeReasons even when SupportsDirectStream=true (the reasons say which profile criteria the source missed); previously this was only surfaced for full Transcode. Now every non-DirectPlay badge tooltip ends with 'direct play blocked: …' followed by the humanized reason list. Cache prefix bumped jpi_v6_ → jpi_v7_ so existing cached tooltips refresh.",
+        "targetAbi": "10.11.0",
+        "version": "0.5.1.0",
+        "sourceUrl": "https://github.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/releases/download/0.5.1.0/Jellyfin.Plugin.PlaybackIndicator_0.5.1.0.zip",
+        "checksum": "e4098fa0fa689f6d568b36f9ba3d7e2b",
+        "timestamp": "2026-05-01"
+      },
+      {
         "changelog": "Refactor + cleanup pass. Plugin Configuration (Cache TTL, Show on Movies, Show on Episodes) is now actually honored at runtime — previously the settings were saved but ignored. Cache page works again (was reading stale jpi_v3_ keys when JS writes jpi_v6_) and now includes Re-mux in the badge label and shows the correct deviceId column. Per-item type lookups are batched into one /Items?Ids= request per scan window. Single shared XHR helper replaces 3 copies of XHR boilerplate. Device profile is mirrored into module memory so we don't reparse localStorage every prediction. Cheap profile fingerprint replaces 30KB JSON.stringify churn on profile updates. MutationObserver now ignores changes that don't touch [data-id]. Stale-badge sweep only runs when removals happen. inflight map no longer leaks. URL-poll setInterval dropped in favor of popstate/hashchange listeners. Plugin.cs file IO consolidated into one helper with the same error handling.",
         "targetAbi": "10.11.0",
         "version": "0.5.0.0",

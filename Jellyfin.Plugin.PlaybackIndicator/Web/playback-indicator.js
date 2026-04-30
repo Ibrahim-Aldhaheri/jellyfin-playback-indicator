@@ -1,5 +1,5 @@
 /**
- * Jellyfin Playback Indicator v0.5.0
+ * Jellyfin Playback Indicator v0.5.1
  *
  * Shows Direct Play / Re-mux / Direct Stream / Transcode badges for items.
  *
@@ -21,15 +21,15 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.5.0';
+    const VERSION = '0.5.1';
     const PLUGIN_ID = 'b6f3e2a1-d4c5-4e7a-8b3f-9e2d1c0a8b5e';
 
-    const RESULT_PREFIX = 'jpi_v6_';
+    const RESULT_PREFIX = 'jpi_v7_';
     const TYPE_PREFIX = 'jpi_type_';
     const PROFILE_KEY = 'jpi_profile';
     // Past prefixes are listed so uninstall + manual cache-clear sweep them.
     const ALL_PREFIXES = [
-        'jpi_v2_', 'jpi_v3_', 'jpi_v4_', 'jpi_v5_', RESULT_PREFIX,
+        'jpi_v2_', 'jpi_v3_', 'jpi_v4_', 'jpi_v5_', 'jpi_v6_', RESULT_PREFIX,
         TYPE_PREFIX, PROFILE_KEY, 'jpi_real_profile'
     ];
 
@@ -845,40 +845,50 @@
         const video = getStreamCodec(src, 'Video');
 
         if (src.SupportsDirectPlay) {
-            return { type: TYPE.DIRECT, reason: container + ' / ' + (video || '?') + ' / ' + (audio || '?') };
+            return {
+                type: TYPE.DIRECT,
+                reason: container + ' / ' + (video || '?') + ' / ' + (audio || '?')
+            };
         }
 
+        // For Re-mux / Direct Stream / Transcode the server populates
+        // TranscodeReasons explaining what blocked Direct Play. Surface that
+        // in every non-DirectPlay tooltip.
+        const why = humanizeTranscodeReasons(src.TranscodeReasons, src);
+        const because = why ? ' — direct play blocked: ' + why : '';
+
         if (src.SupportsDirectStream) {
-            // SupportsDirectStream covers two cases: Re-mux (audio also kept
-            // native) and audio-transcode. The flag doesn't distinguish, so
-            // we infer from the audio whitelist on the device profile.
+            // SupportsDirectStream covers Re-mux (audio also kept native) and
+            // audio-transcode. The flag doesn't distinguish; we infer from the
+            // audio whitelist on the device profile.
             if (audioCodecInProfile(audio, profile)) {
                 return {
                     type: TYPE.REMUX,
-                    reason: container + ' → playable container; ' +
-                        (video || '?') + ' + ' + (audio || '?') + ' kept native'
+                    reason: 'container repackaged, ' +
+                        (video || '?') + ' + ' + (audio || '?') + ' kept native' + because
                 };
             }
             if (audio && FRAGILE_AUDIO.has(audio)) {
                 return {
                     type: TYPE.TRANSCODE,
-                    reason: 'remux + ' + audio.toUpperCase() + ' audio (often fails on browsers)'
+                    reason: 'remux + ' + audio.toUpperCase() + ' audio (often fails on browsers)' + because
                 };
             }
             return {
                 type: TYPE.STREAM,
-                reason: 'video direct, audio transcode (' + (audio || '?') + ')' +
+                reason: 'video direct, audio transcode (' + (audio || '?') + ')' + because +
                     ' — note: audio re-encode with -c:v copy can stall on long-GOP sources or multichannel audio; full transcode is sometimes faster on a fast CPU'
             };
         }
 
         if (src.SupportsTranscoding) {
-            const reasons = humanizeTranscodeReasons(src.TranscodeReasons, src) ||
-                ('video ' + (video || '?') + ', audio ' + (audio || '?'));
-            return { type: TYPE.TRANSCODE, reason: reasons };
+            return {
+                type: TYPE.TRANSCODE,
+                reason: why || ('video ' + (video || '?') + ', audio ' + (audio || '?'))
+            };
         }
 
-        return { type: TYPE.TRANSCODE, reason: 'not playable on this device' };
+        return { type: TYPE.TRANSCODE, reason: 'not playable on this device' + because };
     }
 
     function getStreamCodec(src, type) {
