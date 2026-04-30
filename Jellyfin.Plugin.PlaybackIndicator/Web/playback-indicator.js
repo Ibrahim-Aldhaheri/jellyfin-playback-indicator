@@ -1,5 +1,5 @@
 /**
- * Jellyfin Playback Indicator v0.5.2
+ * Jellyfin Playback Indicator v0.5.3
  *
  * Shows Direct Play / Re-mux / Direct Stream / Transcode badges for items.
  *
@@ -21,16 +21,18 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.5.2';
+    const VERSION = '0.5.3';
     const PLUGIN_ID = 'b6f3e2a1-d4c5-4e7a-8b3f-9e2d1c0a8b5e';
 
     const RESULT_PREFIX = 'jpi_v8_';
     const TYPE_PREFIX = 'jpi_type_';
     const PROFILE_KEY = 'jpi_profile';
+    const BITRATE_KEY = 'jpi_max_bitrate';
+    const DEFAULT_MAX_BITRATE = 120000000; // 120 Mbps when nothing else known
     // Past prefixes are listed so uninstall + manual cache-clear sweep them.
     const ALL_PREFIXES = [
         'jpi_v2_', 'jpi_v3_', 'jpi_v4_', 'jpi_v5_', 'jpi_v6_', 'jpi_v7_', RESULT_PREFIX,
-        TYPE_PREFIX, PROFILE_KEY, 'jpi_real_profile'
+        TYPE_PREFIX, PROFILE_KEY, BITRATE_KEY, 'jpi_real_profile'
     ];
 
     const TYPE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -86,6 +88,7 @@
         keySuffix: null,           // userId + deviceId + codecFp, computed once
         cachedProfile: null,       // parsed device profile, mirrored from localStorage
         cachedProfileFp: null,     // cheap fingerprint for change detection
+        maxBitrate: DEFAULT_MAX_BITRATE, // user's actual MaxStreamingBitrate
         inflight: new Map(),       // itemId -> Promise<{type,reason}|null>
         activeLookups: 0,
         lookupQueue: [],
@@ -127,6 +130,7 @@
         if (state.destroyed) return;
         injectStyles();
 
+        loadPersistedBitrate();
         loadServerConfig();
         primeDeviceProfile();
         attachObservers();
@@ -317,10 +321,37 @@
     function captureProfileFromBody(body) {
         try {
             const parsed = typeof body === 'string' ? JSON.parse(body) : null;
-            const dp = parsed && parsed.DeviceProfile;
-            if (!isUsableProfile(dp)) return;
-            if (dp.Name === 'PlaybackIndicator Synthetic') return; // self-call slipped through
-            persistProfile(dp);
+            if (!parsed) return;
+
+            const dp = parsed.DeviceProfile;
+            if (isUsableProfile(dp) &&
+                dp.Name !== 'PlaybackIndicator Synthetic' &&
+                dp.Name !== 'PlaybackIndicator Synthetic (browser)' &&
+                dp.Name !== 'PlaybackIndicator Synthetic (native shell)') {
+                persistProfile(dp);
+            }
+
+            // Real player calls also include the user's MaxStreamingBitrate
+            // (which respects the Display → Quality slider). Capture it so
+            // our prediction call uses the same cap; otherwise items above
+            // the user's bitrate cap would falsely show as DirectPlay.
+            const bitrate = parsed.MaxStreamingBitrate;
+            if (typeof bitrate === 'number' && bitrate > 0 && bitrate !== state.maxBitrate) {
+                state.maxBitrate = bitrate;
+                try { localStorage.setItem(BITRATE_KEY, String(bitrate)); } catch (_) {}
+                invalidateResultCache();
+                scheduleScan(SCAN_DEBOUNCE_MS);
+            }
+        } catch (_) {}
+    }
+
+    function loadPersistedBitrate() {
+        try {
+            const stored = localStorage.getItem(BITRATE_KEY);
+            if (stored) {
+                const n = parseInt(stored, 10);
+                if (n > 0) state.maxBitrate = n;
+            }
         } catch (_) {}
     }
 
@@ -818,7 +849,7 @@
         const body = {
             UserId: userId,
             DeviceProfile: profile,
-            MaxStreamingBitrate: 120000000,
+            MaxStreamingBitrate: state.maxBitrate,
             StartTimeTicks: 0,
             IsPlayback: false,
             AutoOpenLiveStream: false
@@ -1066,32 +1097,34 @@
         const css = document.createElement('style');
         css.id = 'jpi-styles';
         css.textContent = [
+            // pointer-events stays enabled so the native `title` tooltip
+            // fires on hover. Clicks still bubble to the card for
+            // navigation; we only set cursor:help so the user can see the
+            // hover target is meaningful.
             '.jpi-badge-overlay {',
             '  position: absolute; top: 4px; left: 4px; z-index: 10;',
             '  display: inline-flex; align-items: center; gap: 3px;',
             '  padding: 2px 6px; border-radius: 4px;',
             '  font-size: 10px; font-weight: 700; line-height: 1.3;',
-            '  white-space: nowrap; cursor: default;',
+            '  white-space: nowrap; cursor: help;',
             '  text-shadow: 0 1px 2px rgba(0,0,0,0.6);',
             '  font-family: inherit !important;',
-            '  pointer-events: none !important;',
             '  box-shadow: 0 1px 3px rgba(0,0,0,0.4);',
             '}',
             '.jpi-badge-inline {',
             '  display: inline-flex; align-items: center; gap: 3px;',
             '  margin-left: auto; padding: 1px 6px; border-radius: 4px;',
             '  font-size: 10px; font-weight: 600; line-height: 1.4;',
-            '  white-space: nowrap; cursor: default; flex-shrink: 0;',
+            '  white-space: nowrap; cursor: help; flex-shrink: 0;',
             '  text-shadow: none; font-family: inherit !important;',
-            '  pointer-events: none !important;',
             '}',
             '.jpi-badge-detail {',
             '  display: inline-flex; align-items: center; gap: 4px;',
             '  margin: 0 0 0 12px; padding: 3px 9px; border-radius: 4px;',
             '  font-size: 12px; font-weight: 600; line-height: 1.4;',
             '  white-space: nowrap; vertical-align: middle;',
+            '  cursor: help;',
             '  font-family: inherit !important;',
-            '  pointer-events: none !important;',
             '}',
             '.jpi-direct { background: rgba(26,107,42,0.9); color: #fff; }',
             '.jpi-remux { background: rgba(40,110,180,0.9); color: #fff; }',

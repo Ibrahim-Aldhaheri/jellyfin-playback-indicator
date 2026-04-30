@@ -9,6 +9,14 @@
     "imageUrl": "https://raw.githubusercontent.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/main/icon.png",
     "versions": [
       {
+        "changelog": "Two fixes. (1) Hover tooltips on the badges now actually fire. v0.5.0's CSS set 'pointer-events: none !important;' on the badge spans so they wouldn't intercept clicks meant for the card — but that also disabled hover, so the native title tooltip never appeared. Re-enabled pointer-events; clicks on the badge still bubble up to the card so navigation isn't broken. (2) Plugin now respects the user's MaxStreamingBitrate setting (Settings → Display → Quality). Was previously hardcoded to 120 Mbps in the prediction call, so items above the user's bitrate cap could falsely show ✅ Direct Play even though the real player would force a transcode. Now sniffed from real player calls (same mechanism as the device profile capture) and persisted to localStorage; result cache invalidates on bitrate change.",
+        "targetAbi": "10.11.0",
+        "version": "0.5.3.0",
+        "sourceUrl": "https://github.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/releases/download/0.5.3.0/Jellyfin.Plugin.PlaybackIndicator_0.5.3.0.zip",
+        "checksum": "341d31a5c2266814c88266bc870a11fc",
+        "timestamp": "2026-05-01"
+      },
+      {
         "changelog": "Warn when DirectPlay is likely to stall in browsers despite the server / canPlayType saying it should work. Some container+codec combinations (most notably MKV + HEVC, MKV + AV1, AVI) are known-fragile: Chrome reports 'probably' on canPlayType but the actual demux pipeline stalls on real-world 4K HEVC streams. Now the ✅ Direct Play badge shows ' — ⚠ browser MKV demux of HEVC frequently stalls — try Jellyfin Media Player' in the tooltip when one of these combos is detected in a non-native-shell environment. Native shells (JMP, Android) handle these fine and are not flagged. Cache prefix bumped jpi_v7_ → jpi_v8_.",
         "targetAbi": "10.11.0",
         "version": "0.5.2.0",
