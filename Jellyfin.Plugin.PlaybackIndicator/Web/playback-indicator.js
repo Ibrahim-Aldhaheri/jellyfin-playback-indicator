@@ -1,5 +1,5 @@
 /**
- * Jellyfin Playback Indicator v0.5.1
+ * Jellyfin Playback Indicator v0.5.2
  *
  * Shows Direct Play / Re-mux / Direct Stream / Transcode badges for items.
  *
@@ -21,15 +21,15 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.5.1';
+    const VERSION = '0.5.2';
     const PLUGIN_ID = 'b6f3e2a1-d4c5-4e7a-8b3f-9e2d1c0a8b5e';
 
-    const RESULT_PREFIX = 'jpi_v7_';
+    const RESULT_PREFIX = 'jpi_v8_';
     const TYPE_PREFIX = 'jpi_type_';
     const PROFILE_KEY = 'jpi_profile';
     // Past prefixes are listed so uninstall + manual cache-clear sweep them.
     const ALL_PREFIXES = [
-        'jpi_v2_', 'jpi_v3_', 'jpi_v4_', 'jpi_v5_', 'jpi_v6_', RESULT_PREFIX,
+        'jpi_v2_', 'jpi_v3_', 'jpi_v4_', 'jpi_v5_', 'jpi_v6_', 'jpi_v7_', RESULT_PREFIX,
         TYPE_PREFIX, PROFILE_KEY, 'jpi_real_profile'
     ];
 
@@ -845,9 +845,11 @@
         const video = getStreamCodec(src, 'Video');
 
         if (src.SupportsDirectPlay) {
+            const base = container + ' / ' + (video || '?') + ' / ' + (audio || '?');
+            const risk = browserDirectPlayStallRisk(container, video);
             return {
                 type: TYPE.DIRECT,
-                reason: container + ' / ' + (video || '?') + ' / ' + (audio || '?')
+                reason: risk ? base + ' — ⚠ ' + risk : base
             };
         }
 
@@ -894,6 +896,31 @@
     function getStreamCodec(src, type) {
         const s = (src.MediaStreams || []).find(function (m) { return m.Type === type; });
         return s ? (s.Codec || '').toLowerCase() : null;
+    }
+
+    /**
+     * Detect "Direct Play will probably stall in your browser" cases that
+     * canPlayType lies about. Native-shell environments (JMP, Android) handle
+     * these fine — only flag for browsers.
+     *
+     * Returns a short warning string, or null if the combo is safe.
+     */
+    function browserDirectPlayStallRisk(container, video) {
+        if (isNativeShell()) return null;
+        const c = (container || '').toLowerCase();
+        const v = (video || '').toLowerCase();
+        const isMkv = c === 'mkv' || c === 'matroska';
+
+        if (isMkv && (v === 'hevc' || v === 'h265')) {
+            return 'browser MKV demux of HEVC frequently stalls — try Jellyfin Media Player';
+        }
+        if (isMkv && v === 'av1') {
+            return 'browser MKV+AV1 direct play is unreliable — try Jellyfin Media Player';
+        }
+        if (c === 'avi') {
+            return 'browser AVI direct play is often broken — try Jellyfin Media Player';
+        }
+        return null;
     }
 
     function audioCodecInProfile(audio, profile) {
