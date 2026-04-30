@@ -1,5 +1,5 @@
 /**
- * Jellyfin Playback Indicator v0.4.8
+ * Jellyfin Playback Indicator v0.5.0
  *
  * Shows Direct Play / Re-mux / Direct Stream / Transcode badges for items.
  *
@@ -12,39 +12,44 @@
  * Accuracy strategy (in order of preference):
  *   1. Native shell. JMP and Android inject window.NativeShell.AppHost
  *      whose getDeviceProfile() returns the *exact* profile the native
- *      player would use. This is the same call jellyfin-web itself uses
- *      when starting playback in those shells.
+ *      player uses. Same call jellyfin-web makes when starting playback.
  *   2. Pre-fetch the active session's DeviceProfile via GET /Sessions.
- *      Both top-level `session.DeviceProfile` and
- *      `session.Capabilities.DeviceProfile` are checked since different
- *      clients use different paths; the session matching our DeviceId is
- *      preferred when several are active.
- *   3. Sniff outgoing real player calls (XHR + fetch) to
- *      /Items/{id}/PlaybackInfo and capture any richer profile they send.
- *   4. Synthetic profile as a last resort.
+ *   3. Sniff outgoing real player calls (XHR + fetch) to /Items/{id}/PlaybackInfo
+ *      and capture any richer profile they send.
+ *   4. Synthetic profile as last resort.
  */
 (function () {
     'use strict';
 
-    const VERSION = '0.4.8';
+    const VERSION = '0.5.0';
+    const PLUGIN_ID = 'b6f3e2a1-d4c5-4e7a-8b3f-9e2d1c0a8b5e';
 
     const RESULT_PREFIX = 'jpi_v6_';
     const TYPE_PREFIX = 'jpi_type_';
     const PROFILE_KEY = 'jpi_profile';
+    // Past prefixes are listed so uninstall + manual cache-clear sweep them.
     const ALL_PREFIXES = [
-        'jpi_v2_', 'jpi_v3_', 'jpi_v4_', 'jpi_v5_', 'jpi_v6_',
-        'jpi_type_', 'jpi_profile', 'jpi_real_profile'
+        'jpi_v2_', 'jpi_v3_', 'jpi_v4_', 'jpi_v5_', RESULT_PREFIX,
+        TYPE_PREFIX, PROFILE_KEY, 'jpi_real_profile'
     ];
 
-    const RESULT_TTL_MS = 60 * 60 * 1000;
     const TYPE_TTL_MS = 24 * 60 * 60 * 1000;
     const PROFILE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-
     const SCAN_DEBOUNCE_MS = 350;
-    const URL_POLL_MS = 800;
+    const TYPE_BATCH_WINDOW_MS = 80;
     const MAX_CONCURRENT_LOOKUPS = 4;
 
-    const PLAYABLE_TYPES = new Set(['Episode', 'Movie']);
+    const TYPE = Object.freeze({
+        DIRECT: 'direct', REMUX: 'remux', STREAM: 'stream', TRANSCODE: 'transcode'
+    });
+
+    const BADGES = {
+        [TYPE.DIRECT]:    { cls: 'jpi-direct',    icon: '✅', label: 'Direct Play' },
+        [TYPE.REMUX]:     { cls: 'jpi-remux',     icon: '🔁', label: 'Re-mux' },
+        [TYPE.STREAM]:    { cls: 'jpi-stream',    icon: '⚠️', label: 'Direct Stream' },
+        [TYPE.TRANSCODE]: { cls: 'jpi-transcode', icon: '❌', label: 'Transcode' }
+    };
+
     const NON_PLAYABLE_TYPES = new Set([
         'Series', 'Season', 'BoxSet', 'CollectionFolder', 'Folder',
         'MusicArtist', 'MusicAlbum', 'Audio', 'Photo', 'PhotoAlbum',
@@ -54,25 +59,42 @@
     // Audio codecs that often claim to remux but actually fail on browsers/TVs.
     const FRAGILE_AUDIO = new Set(['truehd', 'mlp']);
 
-    const BADGES = {
-        direct:    { cls: 'jpi-direct',    icon: '✅', label: 'Direct Play' },
-        remux:     { cls: 'jpi-remux',     icon: '🔁', label: 'Re-mux' },
-        stream:    { cls: 'jpi-stream',    icon: '⚠️', label: 'Direct Stream' },
-        transcode: { cls: 'jpi-transcode', icon: '❌', label: 'Transcode' }
+    const CARD_IMAGE_SELECTOR =
+        '.cardImageContainer, [class*="cardImage"], [class*="CardImage"], ' +
+        '.listItemImage, [class*="listItemImage"]';
+    const PLACE_TARGET_SELECTOR =
+        '.cardImageContainer, [class*="cardImage"], [class*="CardImage"], ' +
+        '.cardBox, [class*="cardBox"]';
+    const LIST_BODY_SELECTOR =
+        '.listItemBody, [class*="listItemBody"], [class*="episodeBody"], .itemBody';
+    const DETAIL_TARGET_SELECTOR =
+        '.itemMiscInfo-primary, .itemMiscInfo, [class*="itemMiscInfo"], ' +
+        '.mainDetailButtons, [class*="mainDetailButtons"]';
+
+    // Runtime config (overridable by server-side PluginConfiguration).
+    const config = {
+        resultTtlMs: 60 * 60 * 1000,
+        showOnMovies: true,
+        showOnEpisodes: true
     };
 
-    let observer = null;
-    let scanTimer = null;
-    let urlPollTimer = null;
-    let lastUrl = '';
-    let destroyed = false;
-    let codecFp = null;
-    let inflight = new Map();   // itemId -> Promise<{type,reason}|null>
-    let activeLookups = 0;
-    let lookupQueue = [];
+    // Module state.
+    const state = {
+        observer: null,
+        scanTimer: null,
+        destroyed: false,
+        keySuffix: null,           // userId + deviceId + codecFp, computed once
+        cachedProfile: null,       // parsed device profile, mirrored from localStorage
+        cachedProfileFp: null,     // cheap fingerprint for change detection
+        inflight: new Map(),       // itemId -> Promise<{type,reason}|null>
+        activeLookups: 0,
+        lookupQueue: [],
+        typeBatch: null,           // { ids:[], waiters:Map, timer }
+        sweepNeeded: false         // set when DOM nodes were removed
+    };
 
-    // Install XHR interception immediately so we never miss the first real
-    // play call (which may happen before our init runs).
+    // ─── Boot ───────────────────────────────────────────────────────────────
+
     installProfileSniffer();
 
     if (document.readyState === 'loading') {
@@ -81,60 +103,12 @@
         boot();
     }
 
-    // ─── Boot ────────────────────────────────────────────────────────────────
-
     function boot() {
-        // Wait until ApiClient is ready and the user is signed in.
         waitFor(function () {
             const ac = window.ApiClient;
             return ac && ac.accessToken && ac.accessToken() &&
                 ac.getCurrentUserId && ac.getCurrentUserId();
-        }, 500, 60).then(start, function () {
-            // Never started — user not logged in. Quietly stop.
-        });
-    }
-
-    function start() {
-        if (destroyed) return;
-        injectStyles();
-
-        // Race the two reliable profile sources. NativeShell is preferred
-        // because in JMP / Android it returns the actual profile the native
-        // player would use; the /Sessions fallback covers the browser case.
-        getNativeShellProfile().then(function (nsProfile) {
-            if (nsProfile) {
-                console.info('[PlaybackIndicator] using device profile from NativeShell.AppHost: ' +
-                    (nsProfile.Name || '(unnamed)') +
-                    ' (' + (nsProfile.DirectPlayProfiles || []).length + ' direct-play entries)');
-                persistProfile(nsProfile);
-                return;
-            }
-            return fetchSessionProfile().then(function (profile) {
-                if (profile) persistProfile(profile);
-            });
-        });
-
-        observer = new MutationObserver(function (mutations) {
-            for (let i = 0; i < mutations.length; i++) {
-                if (mutations[i].addedNodes && mutations[i].addedNodes.length) {
-                    scheduleScan(SCAN_DEBOUNCE_MS);
-                    return;
-                }
-            }
-        });
-        observer.observe(document.body, { childList: true, subtree: true });
-
-        urlPollTimer = setInterval(function () {
-            if (window.location.href !== lastUrl) {
-                lastUrl = window.location.href;
-                inflight.clear(); // page changed, prior in-flight results may be irrelevant
-                scheduleScan(SCAN_DEBOUNCE_MS);
-            }
-        }, URL_POLL_MS);
-
-        scheduleScan(600);
-        // eslint-disable-next-line no-console
-        console.log('[PlaybackIndicator] v' + VERSION + ' active');
+        }, 500, 60).then(start, function () { /* user not logged in */ });
     }
 
     function waitFor(predicate, intervalMs, maxTries) {
@@ -149,40 +123,135 @@
         });
     }
 
-    function scheduleScan(delay) {
-        if (destroyed) return;
-        clearTimeout(scanTimer);
-        scanTimer = setTimeout(scan, delay);
+    function start() {
+        if (state.destroyed) return;
+        injectStyles();
+
+        loadServerConfig();
+        primeDeviceProfile();
+        attachObservers();
+
+        scheduleScan(600);
+        // eslint-disable-next-line no-console
+        console.log('[PlaybackIndicator] v' + VERSION + ' active');
     }
 
-    // ─── Cleanup (for uninstall and self-removal) ────────────────────────────
+    function loadServerConfig() {
+        apiCall('GET', '/web/ConfigurationPages')
+            .catch(function () { /* unavailable, that's fine */ });
+
+        apiCall('GET', '/Plugins/' + PLUGIN_ID + '/Configuration')
+            .then(function (cfg) {
+                if (!cfg) return;
+                if (typeof cfg.CacheTtlMinutes === 'number' && cfg.CacheTtlMinutes > 0) {
+                    config.resultTtlMs = cfg.CacheTtlMinutes * 60 * 1000;
+                }
+                if (typeof cfg.ShowBadgeOnMovies === 'boolean') {
+                    config.showOnMovies = cfg.ShowBadgeOnMovies;
+                }
+                if (typeof cfg.ShowBadgeOnEpisodes === 'boolean') {
+                    config.showOnEpisodes = cfg.ShowBadgeOnEpisodes;
+                }
+            })
+            .catch(function () { /* fall back to defaults */ });
+    }
+
+    function primeDeviceProfile() {
+        getNativeShellProfile().then(function (nsProfile) {
+            if (nsProfile) {
+                logProfileSource('NativeShell.AppHost', nsProfile);
+                persistProfile(nsProfile);
+                return;
+            }
+            return fetchSessionProfile().then(function (profile) {
+                if (profile) {
+                    logProfileSource('session', profile);
+                    persistProfile(profile);
+                }
+            });
+        });
+    }
+
+    function logProfileSource(source, profile) {
+        console.info('[PlaybackIndicator] using device profile from ' + source + ': ' +
+            (profile.Name || '(unnamed)') +
+            ' (' + (profile.DirectPlayProfiles || []).length + ' direct-play entries)');
+    }
+
+    function attachObservers() {
+        state.observer = new MutationObserver(function (mutations) {
+            for (let i = 0; i < mutations.length; i++) {
+                const m = mutations[i];
+                if (m.removedNodes && m.removedNodes.length) state.sweepNeeded = true;
+                if (mutationTouchesItems(m)) {
+                    scheduleScan(SCAN_DEBOUNCE_MS);
+                    return;
+                }
+            }
+        });
+        state.observer.observe(document.body, { childList: true, subtree: true });
+
+        // SPA navigation in jellyfin-web fires popstate/hashchange — no need
+        // for an interval poll on top of the MutationObserver.
+        const onNav = function () {
+            state.inflight.clear();
+            state.lookupQueue.length = 0;
+            scheduleScan(SCAN_DEBOUNCE_MS);
+        };
+        window.addEventListener('popstate', onNav);
+        window.addEventListener('hashchange', onNav);
+    }
+
+    function mutationTouchesItems(m) {
+        const added = m.addedNodes;
+        if (!added || !added.length) return false;
+        for (let i = 0; i < added.length; i++) {
+            const n = added[i];
+            if (n.nodeType !== 1) continue;
+            if (n.hasAttribute && n.hasAttribute('data-id')) return true;
+            if (n.querySelector && n.querySelector('[data-id]')) return true;
+        }
+        return false;
+    }
+
+    function scheduleScan(delay) {
+        if (state.destroyed) return;
+        clearTimeout(state.scanTimer);
+        state.scanTimer = setTimeout(scan, delay);
+    }
+
+    // ─── Cleanup ────────────────────────────────────────────────────────────
 
     window.__jpi_cleanup = function () {
-        destroyed = true;
-        if (observer) { try { observer.disconnect(); } catch (_) {} observer = null; }
-        clearTimeout(scanTimer);
-        clearInterval(urlPollTimer);
+        state.destroyed = true;
+        if (state.observer) { try { state.observer.disconnect(); } catch (_) {} state.observer = null; }
+        clearTimeout(state.scanTimer);
         const styles = document.getElementById('jpi-styles');
         if (styles) styles.remove();
         document.querySelectorAll('[data-jpi], [data-jpi-detail]').forEach(function (b) { b.remove(); });
-        try {
-            Object.keys(localStorage).forEach(function (k) {
-                for (let i = 0; i < ALL_PREFIXES.length; i++) {
-                    if (k.indexOf(ALL_PREFIXES[i]) === 0) {
-                        localStorage.removeItem(k);
-                        return;
-                    }
-                }
-            });
-        } catch (_) {}
+        removeKeysWithPrefixes(ALL_PREFIXES);
     };
 
-    // ─── Device profile sniffer ──────────────────────────────────────────────
+    function removeKeysWithPrefixes(prefixes) {
+        try {
+            const keys = Object.keys(localStorage);
+            for (let i = 0; i < keys.length; i++) {
+                for (let j = 0; j < prefixes.length; j++) {
+                    if (keys[i].indexOf(prefixes[j]) === 0) {
+                        localStorage.removeItem(keys[i]);
+                        break;
+                    }
+                }
+            }
+        } catch (_) {}
+    }
+
+    // ─── Device profile sources ─────────────────────────────────────────────
 
     /**
      * Hook XMLHttpRequest AND fetch. When the real Jellyfin web client posts
-     * to /Items/{id}/PlaybackInfo with a DeviceProfile, capture that profile.
-     * Our own calls are marked with the X-JPI-Self header and skipped.
+     * to /Items/{id}/PlaybackInfo with a DeviceProfile, capture it. Our own
+     * calls are marked with X-JPI-Self and skipped.
      */
     function installProfileSniffer() {
         const isPlaybackUrl = function (u) {
@@ -199,15 +268,10 @@
                 this.__jpiMethod = method;
                 return origOpen.apply(this, arguments);
             };
-
             XMLHttpRequest.prototype.setRequestHeader = function (name) {
-                if (name === 'X-JPI-Self') {
-                    this.__jpiSelf = true;
-                    return; // don't forward — server doesn't need it
-                }
+                if (name === 'X-JPI-Self') { this.__jpiSelf = true; return; }
                 return origSetHeader.apply(this, arguments);
             };
-
             XMLHttpRequest.prototype.send = function (body) {
                 if (!this.__jpiSelf && this.__jpiMethod &&
                     this.__jpiMethod.toUpperCase() === 'POST' &&
@@ -241,7 +305,6 @@
         if (!h) return null;
         try {
             if (typeof h.get === 'function') return h.get(name);
-            // Plain object — case-insensitive lookup
             const lower = name.toLowerCase();
             const keys = Object.keys(h);
             for (let i = 0; i < keys.length; i++) {
@@ -255,74 +318,10 @@
         try {
             const parsed = typeof body === 'string' ? JSON.parse(body) : null;
             const dp = parsed && parsed.DeviceProfile;
-            if (!dp || !Array.isArray(dp.DirectPlayProfiles) || dp.DirectPlayProfiles.length < 1) return;
-            // Real player profiles tend to be richer than ours; reject only if
-            // it looks suspiciously like our own synthetic.
-            if (dp.Name === 'PlaybackIndicator Synthetic') return;
+            if (!isUsableProfile(dp)) return;
+            if (dp.Name === 'PlaybackIndicator Synthetic') return; // self-call slipped through
             persistProfile(dp);
         } catch (_) {}
-    }
-
-    /**
-     * Save profile to localStorage and invalidate result cache if the profile
-     * has actually changed (so old wrong predictions don't stick around).
-     */
-    function persistProfile(profile) {
-        try {
-            const stored = JSON.stringify({ profile: profile, captured: Date.now() });
-            const existing = localStorage.getItem(PROFILE_KEY);
-            const existingProfileStr = existing ? JSON.stringify(JSON.parse(existing).profile) : '';
-            const newProfileStr = JSON.stringify(profile);
-            localStorage.setItem(PROFILE_KEY, stored);
-            if (existingProfileStr !== newProfileStr) {
-                invalidateResultCache();
-                scheduleScan(SCAN_DEBOUNCE_MS);
-            }
-        } catch (_) {}
-    }
-
-    function invalidateResultCache() {
-        try {
-            const keys = Object.keys(localStorage);
-            for (let i = 0; i < keys.length; i++) {
-                if (keys[i].indexOf(RESULT_PREFIX) === 0) localStorage.removeItem(keys[i]);
-            }
-        } catch (_) {}
-        // Drop in-flight lookups too — they were issued with the old profile.
-        inflight.clear();
-        lookupQueue.length = 0;
-        document.querySelectorAll('[data-jpi], [data-jpi-detail]').forEach(function (b) { b.remove(); });
-    }
-
-    /**
-     * Ask the native shell directly. JMP and Android inject
-     * window.NativeShell.AppHost.getDeviceProfile() which returns the exact
-     * DeviceProfile their native player handles — same call jellyfin-web
-     * uses when it actually starts playback in those environments.
-     *
-     * Some implementations return synchronously, others a Promise. Some take
-     * an `item` argument for context-dependent decisions; calling without
-     * one yields a generic profile that's correct for our prediction use.
-     */
-    function getNativeShellProfile() {
-        return new Promise(function (resolve) {
-            try {
-                const ns = window.NativeShell;
-                const ah = ns && ns.AppHost;
-                const fn = ah && typeof ah.getDeviceProfile === 'function'
-                    ? ah.getDeviceProfile.bind(ah) : null;
-                if (!fn) { resolve(null); return; }
-                let result;
-                try { result = fn(); }
-                catch (_) { try { result = fn(null); } catch (__) { result = null; } }
-                if (result && typeof result.then === 'function') {
-                    result.then(function (p) { resolve(isUsableProfile(p) ? p : null); },
-                                function () { resolve(null); });
-                } else {
-                    resolve(isUsableProfile(result) ? result : null);
-                }
-            } catch (_) { resolve(null); }
-        });
     }
 
     function isUsableProfile(p) {
@@ -330,128 +329,129 @@
     }
 
     /**
-     * Pre-fetch the device profile from the active session. Jellyfin web /
-     * JMP / Android all POST their full DeviceProfile when the session opens,
-     * so this gives us an accurate profile right away.
-     *
-     * Different clients store the profile in different places — we check both
-     * `session.DeviceProfile` (JMP, Android) and `session.Capabilities.DeviceProfile`
-     * (Jellyfin web, mobile web). We also prefer the session matching our
-     * deviceId in case the user has several active.
+     * Cheap fingerprint for change-detection: count + name + first profile's
+     * containers. ~30 chars instead of stringifying a 10KB+ profile.
+     */
+    function profileFingerprint(p) {
+        if (!p) return '';
+        const dp = p.DirectPlayProfiles || [];
+        const first = dp[0] || {};
+        return (p.Name || '') + '|' + dp.length + '|' + (first.Container || '') + '|' + (first.AudioCodec || '');
+    }
+
+    function persistProfile(profile) {
+        const fp = profileFingerprint(profile);
+        if (fp === state.cachedProfileFp) return; // no change
+        state.cachedProfile = profile;
+        state.cachedProfileFp = fp;
+        try {
+            localStorage.setItem(PROFILE_KEY, JSON.stringify({
+                profile: profile, captured: Date.now()
+            }));
+        } catch (_) {}
+        invalidateResultCache();
+        scheduleScan(SCAN_DEBOUNCE_MS);
+    }
+
+    function invalidateResultCache() {
+        removeKeysWithPrefixes([RESULT_PREFIX]);
+        state.inflight.clear();
+        state.lookupQueue.length = 0;
+        document.querySelectorAll('[data-jpi], [data-jpi-detail]').forEach(function (b) { b.remove(); });
+    }
+
+    /**
+     * Ask the native shell. JMP and Android expose their actual profile via
+     * window.NativeShell.AppHost.getDeviceProfile() — same call jellyfin-web
+     * uses to start playback in those shells.
+     */
+    function getNativeShellProfile() {
+        return new Promise(function (resolve) {
+            const ah = window.NativeShell && window.NativeShell.AppHost;
+            const fn = ah && typeof ah.getDeviceProfile === 'function'
+                ? ah.getDeviceProfile.bind(ah) : null;
+            if (!fn) { resolve(null); return; }
+
+            let result;
+            try { result = fn(); }
+            catch (_) { try { result = fn(null); } catch (__) { resolve(null); return; } }
+
+            const accept = function (p) { resolve(isUsableProfile(p) ? p : null); };
+            if (result && typeof result.then === 'function') {
+                result.then(accept, function () { resolve(null); });
+            } else {
+                accept(result);
+            }
+        });
+    }
+
+    /**
+     * Pre-fetch the device profile from the active session. Different clients
+     * store it in different paths (top-level session.DeviceProfile vs
+     * session.Capabilities.DeviceProfile); the session matching our DeviceId
+     * is preferred when several are active.
      */
     function fetchSessionProfile() {
-        return new Promise(function (resolve) {
-            try {
-                const ac = window.ApiClient;
-                if (!ac) { resolve(null); return; }
-                const myDeviceId = (ac.deviceId && ac.deviceId()) || '';
-                const url = serverAddress() + '/Sessions';
-                const xhr = new XMLHttpRequest();
-                xhr.timeout = 6000;
-                xhr.onload = function () {
-                    try {
-                        if (xhr.status >= 200 && xhr.status < 300) {
-                            const sessions = JSON.parse(xhr.responseText);
-                            const profile = pickSessionProfile(sessions, myDeviceId);
-                            if (profile) {
-                                console.info('[PlaybackIndicator] using device profile from session: ' +
-                                    (profile.Name || '(unnamed)') +
-                                    ' (' + (profile.DirectPlayProfiles || []).length + ' direct-play entries)');
-                                resolve(profile);
-                                return;
-                            }
-                        }
-                    } catch (_) {}
-                    resolve(null);
-                };
-                xhr.onerror = function () { resolve(null); };
-                xhr.ontimeout = function () { resolve(null); };
-                xhr.open('GET', url, true);
-                xhr.setRequestHeader('X-JPI-Self', '1');
-                xhr.setRequestHeader('X-Emby-Authorization', authHeader());
-                xhr.send();
-            } catch (_) { resolve(null); }
-        });
+        return apiCall('GET', '/Sessions')
+            .then(function (sessions) {
+                return pickSessionProfile(sessions, getDeviceId());
+            })
+            .catch(function () { return null; });
     }
 
     function pickSessionProfile(sessions, myDeviceId) {
         if (!Array.isArray(sessions)) return null;
         const extract = function (s) {
-            if (!s) return null;
-            return s.DeviceProfile ||
-                (s.Capabilities && s.Capabilities.DeviceProfile) ||
-                null;
+            return (s && s.DeviceProfile) ||
+                (s && s.Capabilities && s.Capabilities.DeviceProfile) || null;
         };
-        const isUsable = function (dp) {
-            return dp && Array.isArray(dp.DirectPlayProfiles) &&
-                dp.DirectPlayProfiles.length >= 1;
-        };
-
-        // Prefer the session whose DeviceId matches ours.
         for (let i = 0; i < sessions.length; i++) {
             if (sessions[i].DeviceId === myDeviceId) {
                 const dp = extract(sessions[i]);
-                if (isUsable(dp)) return dp;
+                if (isUsableProfile(dp)) return dp;
             }
         }
-        // Fall back to any usable profile in the response.
         for (let i = 0; i < sessions.length; i++) {
             const dp = extract(sessions[i]);
-            if (isUsable(dp)) return dp;
+            if (isUsableProfile(dp)) return dp;
         }
         return null;
     }
 
     function getDeviceProfile() {
+        if (state.cachedProfile) return state.cachedProfile;
         try {
             const raw = localStorage.getItem(PROFILE_KEY);
             if (raw) {
                 const e = JSON.parse(raw);
                 if (e.profile && (Date.now() - (e.captured || 0)) < PROFILE_TTL_MS) {
-                    return e.profile;
+                    state.cachedProfile = e.profile;
+                    state.cachedProfileFp = profileFingerprint(e.profile);
+                    return state.cachedProfile;
                 }
             }
         } catch (_) {}
-        return buildSyntheticProfile();
+        const synthetic = buildSyntheticProfile();
+        state.cachedProfile = synthetic;
+        state.cachedProfileFp = profileFingerprint(synthetic);
+        return synthetic;
     }
 
     /**
-     * True if we're running inside a native-shell wrapper (Jellyfin Media
-     * Player, Jellyfin Android, etc.) where canPlayType() does NOT reflect
-     * actual playback capability — the wrapper hands streams to a native
-     * player (mpv, ExoPlayer) that handles far more codecs than the embedded
-     * <video> element advertises. Detected via the NativeShell global the
-     * shells inject, or via a User-Agent marker.
+     * True if running inside a native-shell wrapper (JMP, Android) where
+     * canPlayType() doesn't reflect actual playback capability.
      */
     function isNativeShell() {
         if (window.NativeShell) return true;
         const ua = (navigator.userAgent || '').toLowerCase();
-        if (ua.indexOf('jellyfin-media-player') !== -1 ||
-            ua.indexOf('jellyfinmediaplayer') !== -1 ||
-            ua.indexOf('jellyfinandroid') !== -1) return true;
+        if (/jellyfin-?media-?player|jellyfinandroid/.test(ua)) return true;
         try {
-            const ac = window.ApiClient;
-            const name = ((ac && ac._clientName) || '').toLowerCase();
-            if (/jellyfin\s*media\s*player|jellyfin.?mobile|jellyfin.?android|mpv\s*shim/.test(name)) {
-                return true;
-            }
+            const name = ((window.ApiClient && window.ApiClient._clientName) || '').toLowerCase();
+            return /jellyfin\s*media\s*player|jellyfin.?mobile|jellyfin.?android|mpv\s*shim/.test(name);
         } catch (_) {}
         return false;
     }
 
-    /**
-     * Synthetic fallback. Used only if the session profile fetch and the XHR
-     * /fetch sniffer have both failed to produce a real profile.
-     *
-     * For native shells (JMP, Android) we emit a maximal profile because
-     * those clients can play essentially anything via mpv/ExoPlayer; gating
-     * on canPlayType() would produce empty codec lists since native players
-     * bypass the HTML video element entirely.
-     *
-     * For real browsers we still derive from canPlayType() but seed the lists
-     * with codecs every modern browser actually plays (h264 + aac + mp3) so
-     * we never fall to "no direct-play possible" by accident.
-     */
     function buildSyntheticProfile() {
         if (isNativeShell()) {
             console.info('[PlaybackIndicator] native shell detected; using permissive synthetic profile');
@@ -459,30 +459,27 @@
                 Name: 'PlaybackIndicator Synthetic (native shell)',
                 MaxStreamingBitrate: 200000000,
                 MaxStaticBitrate: 200000000,
-                DirectPlayProfiles: [
-                    { Container: 'mp4,m4v,mov,mkv,avi,wmv,3gp,3g2,m2ts,mts,ts,mpegts,asf,flv,vob,ogm,ogv,webm',
-                      Type: 'Video',
-                      VideoCodec: 'h264,h265,hevc,vp8,vp9,av1,mpeg4,mpeg2video,vc1,wmv3',
-                      AudioCodec: 'aac,mp3,ac3,eac3,dts,dca,truehd,mlp,flac,opus,vorbis,wma,wmav2,pcm,pcm_s16le,pcm_s24le' }
-                ],
-                TranscodingProfiles: [
-                    { Container: 'ts', Type: 'Video', VideoCodec: 'h264',
-                      AudioCodec: 'aac,mp3,ac3', Context: 'Streaming', Protocol: 'hls' }
-                ]
+                DirectPlayProfiles: [{
+                    Container: 'mp4,m4v,mov,mkv,avi,wmv,3gp,3g2,m2ts,mts,ts,mpegts,asf,flv,vob,ogm,ogv,webm',
+                    Type: 'Video',
+                    VideoCodec: 'h264,h265,hevc,vp8,vp9,av1,mpeg4,mpeg2video,vc1,wmv3',
+                    AudioCodec: 'aac,mp3,ac3,eac3,dts,dca,truehd,mlp,flac,opus,vorbis,wma,wmav2,pcm,pcm_s16le,pcm_s24le'
+                }],
+                TranscodingProfiles: [{
+                    Container: 'ts', Type: 'Video', VideoCodec: 'h264',
+                    AudioCodec: 'aac,mp3,ac3', Context: 'Streaming', Protocol: 'hls'
+                }]
             };
         }
 
-        const v = document.createElement('video');
-        const cp = function (t) { try { return v.canPlayType(t); } catch (_) { return ''; } };
-        const has = function (t) { return cp(t) !== ''; };
+        const probe = canPlayProbe();
+        const supportsHevc = probe('video/mp4; codecs="hvc1"') || probe('video/mp4; codecs="hev1"');
+        const supportsVP9 = probe('video/webm; codecs="vp9"');
+        const supportsAV1 = probe('video/mp4; codecs="av01.0.01M.08"');
+        const supportsAC3 = probe('audio/mp4; codecs="ac-3"') || probe('audio/ac3');
 
-        const supportsHevc = has('video/mp4; codecs="hvc1"') || has('video/mp4; codecs="hev1"');
-        const supportsVP9 = has('video/webm; codecs="vp9"');
-        const supportsAV1 = has('video/mp4; codecs="av01.0.01M.08"');
-        const supportsAC3 = has('audio/mp4; codecs="ac-3"') || has('audio/ac3');
-
-        // Seed with codecs every modern browser actually plays so empty
-        // canPlayType() responses never strand us on "no codecs supported".
+        // Seed with codecs every modern browser plays so empty canPlayType()
+        // never strands us on "no codecs supported".
         const videoCodecs = ['h264', 'vp8'];
         if (supportsHevc) videoCodecs.push('hevc', 'h265');
         if (supportsVP9) videoCodecs.push('vp9');
@@ -491,7 +488,7 @@
         const audioCodecs = ['aac', 'mp3', 'opus', 'flac', 'vorbis'];
         if (supportsAC3) audioCodecs.push('ac3', 'eac3');
 
-        console.info('[PlaybackIndicator] no captured profile, using browser synthetic; codecs: video=' +
+        console.info('[PlaybackIndicator] no captured profile; browser synthetic video=' +
             videoCodecs.join('/') + ' audio=' + audioCodecs.join('/'));
 
         return {
@@ -508,14 +505,22 @@
                   VideoCodec: 'h264' + (supportsHevc ? ',hevc,h265' : ''),
                   AudioCodec: audioCodecs.join(',') }
             ],
-            TranscodingProfiles: [
-                { Container: 'ts', Type: 'Video', VideoCodec: 'h264',
-                  AudioCodec: 'aac,mp3', Context: 'Streaming', Protocol: 'hls' }
-            ]
+            TranscodingProfiles: [{
+                Container: 'ts', Type: 'Video', VideoCodec: 'h264',
+                AudioCodec: 'aac,mp3', Context: 'Streaming', Protocol: 'hls'
+            }]
         };
     }
 
-    // ─── Cache ───────────────────────────────────────────────────────────────
+    let _video;
+    function canPlayProbe() {
+        if (!_video) _video = document.createElement('video');
+        return function (mime) {
+            try { return _video.canPlayType(mime) !== ''; } catch (_) { return false; }
+        };
+    }
+
+    // ─── Cache + key derivation ─────────────────────────────────────────────
 
     function readCache(prefix, key) {
         try {
@@ -538,18 +543,23 @@
         } catch (_) {}
     }
 
+    function getKeySuffix() {
+        if (!state.keySuffix) {
+            const ac = window.ApiClient;
+            const userId = (ac && ac.getCurrentUserId && ac.getCurrentUserId()) || 'u';
+            const deviceId = (ac && ac.deviceId && ac.deviceId()) || 'd';
+            state.keySuffix = '_' + userId + '_' + deviceId + '_' + computeCodecFp();
+        }
+        return state.keySuffix;
+    }
+
     function makeResultKey(itemId) {
-        const ac = window.ApiClient;
-        const userId = ac.getCurrentUserId() || 'u';
-        const deviceId = (ac.deviceId && ac.deviceId()) || 'd';
-        if (!codecFp) codecFp = computeCodecFp();
-        return itemId + '_' + userId + '_' + deviceId + '_' + codecFp;
+        return itemId + getKeySuffix();
     }
 
     function computeCodecFp() {
         try {
-            const v = document.createElement('video');
-            const cp = function (t) { try { return v.canPlayType(t); } catch (_) { return ''; } };
+            const probe = canPlayProbe();
             const tests = [
                 'video/mp4; codecs="avc1.42E01E"',
                 'video/mp4; codecs="hvc1"',
@@ -560,19 +570,12 @@
                 'audio/webm; codecs="opus"',
                 'audio/flac'
             ];
-            return tests.map(function (t) {
-                const r = cp(t);
-                return r === 'probably' ? '2' : r === 'maybe' ? '1' : '0';
-            }).join('');
+            return tests.map(function (t) { return probe(t) ? '1' : '0'; }).join('');
         } catch (_) { return 'x'; }
     }
 
-    // ─── DOM scan ────────────────────────────────────────────────────────────
+    // ─── DOM scan ───────────────────────────────────────────────────────────
 
-    /**
-     * Find candidate elements: any [data-id] node that looks like a media card
-     * or list item AND has not been ruled out by data-type/data-itemtype.
-     */
     function findCandidates() {
         const seen = new Map();
         const nodes = document.querySelectorAll('[data-id]');
@@ -584,60 +587,57 @@
 
             const dataType = el.getAttribute('data-type') || el.getAttribute('data-itemtype');
             if (dataType && NON_PLAYABLE_TYPES.has(dataType)) continue;
-
+            if (!isPlayableTypeAllowed(dataType)) continue;
             if (!looksLikeMediaContainer(el)) continue;
             if (el.querySelector('[data-jpi]')) continue;
 
-            // Dedupe: keep the OUTERMOST container per id. Action buttons,
-            // overlays, and image links inside a card often share the card's
-            // data-id; the badge belongs on the card root, not on those.
-            if (seen.has(id)) {
-                const existing = seen.get(id);
-                if (existing.el.contains(el)) continue; // current is deeper, keep outer
+            // Dedupe: keep the OUTERMOST container per id (action buttons and
+            // inner overlays that share the card's data-id should not win).
+            const existing = seen.get(id);
+            if (existing) {
+                if (existing.el.contains(el)) continue;
                 if (el.contains(existing.el)) {
-                    seen.set(id, { el: el, hint: dataType && PLAYABLE_TYPES.has(dataType) ? dataType : null });
+                    seen.set(id, candidateEntry(el, dataType));
                 }
                 continue;
             }
-            seen.set(id, { el: el, hint: dataType && PLAYABLE_TYPES.has(dataType) ? dataType : null });
+            seen.set(id, candidateEntry(el, dataType));
         }
         return Array.from(seen.values());
     }
 
-    function looksLikeMediaContainer(el) {
-        // Buttons and form controls are never card roots, even when their
-        // class names contain "card" (e.g. cardOverlayButton).
-        const tag = el.tagName;
-        if (tag === 'BUTTON' || tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') {
-            return false;
-        }
-
-        const cls = (typeof el.className === 'string') ? el.className : '';
-
-        // Block known action-button / overlay class patterns. These can
-        // contain "card" as a substring but they are NOT the card root.
-        if (/(cardOverlay|paper-icon-button|btnUserData|btnUserItemRating|btn-)/i.test(cls)) {
-            return false;
-        }
-
-        // Allowlist actual card / list-item containers. Use word boundaries on
-        // "card" so cardOverlay/cardOverlayButton don't slip through.
-        if (/(\bcard\b|listItem|episodeItem|itemCard|portraitCard|landscapeCard|squareCard|backdropCard)/i.test(cls)) {
-            return true;
-        }
-
-        // Last resort: contains a real card image as a descendant.
-        return !!el.querySelector(
-            '.cardImageContainer, [class*="cardImage"], [class*="CardImage"], ' +
-            '.listItemImage, [class*="listItemImage"]'
-        );
+    function candidateEntry(el, dataType) {
+        const hint = (dataType === 'Episode' || dataType === 'Movie') ? dataType : null;
+        return { el: el, hint: hint };
     }
 
     /**
-     * Remove badges that ended up in the wrong place — left over from older
-     * builds that placed badges inside action buttons, or stranded inside a
-     * DOM node whose data-id has since been recycled by Jellyfin's
-     * virtualized scroller for a different item.
+     * Filter at scan time per server config. Episodes and movies that the
+     * user disabled in the plugin settings are skipped before any lookup.
+     */
+    function isPlayableTypeAllowed(hint) {
+        if (hint === 'Movie') return config.showOnMovies;
+        if (hint === 'Episode') return config.showOnEpisodes;
+        return true; // unknown — let the lookup decide
+    }
+
+    function looksLikeMediaContainer(el) {
+        const tag = el.tagName;
+        if (tag === 'BUTTON' || tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return false;
+
+        const cls = (typeof el.className === 'string') ? el.className : '';
+        // Action-button / overlay class patterns can contain "card" but are
+        // not the card root.
+        if (/(cardOverlay|paper-icon-button|btnUserData|btnUserItemRating|btn-)/i.test(cls)) return false;
+        if (/(\bcard\b|listItem|episodeItem|itemCard|portraitCard|landscapeCard|squareCard|backdropCard)/i.test(cls)) return true;
+        return !!el.querySelector(CARD_IMAGE_SELECTOR);
+    }
+
+    /**
+     * Remove badges left behind in the wrong place by older builds (inside
+     * buttons) or stranded after Jellyfin's virtualized scroller recycled a
+     * DOM node for a different item. Only runs when the observer reports a
+     * removal, since that's the only signal recycling produces.
      */
     function sweepStaleBadges() {
         const badges = document.querySelectorAll('[data-jpi]');
@@ -652,8 +652,11 @@
     }
 
     function scan() {
-        if (destroyed) return;
-        sweepStaleBadges();
+        if (state.destroyed) return;
+        if (state.sweepNeeded) {
+            sweepStaleBadges();
+            state.sweepNeeded = false;
+        }
         const candidates = findCandidates();
         for (let i = 0; i < candidates.length; i++) {
             processItem(candidates[i].el, candidates[i].el.getAttribute('data-id'), candidates[i].hint);
@@ -661,44 +664,33 @@
         processDetailPage();
     }
 
-    // ─── Detail page badge ──────────────────────────────────────────────────
+    // ─── Per-item / detail-page processing ──────────────────────────────────
 
-    /**
-     * On the item details page (#/details?id=...) inject a badge in the misc
-     * info row so the user doesn't have to leave the page to see the
-     * predicted playback method.
-     */
+    function processItem(el, itemId, hint) {
+        getOrLookup(itemId, hint, function () {
+            return document.body.contains(el);
+        }).then(function (result) {
+            if (state.destroyed || !result) return;
+            placeBadge(el, itemId, result.type, result.reason, /*isDetail*/ false);
+        });
+    }
+
     function processDetailPage() {
         const itemId = extractDetailItemId();
         if (!itemId) return;
         if (document.querySelector('[data-jpi-detail="' + itemId + '"]')) return;
 
-        // Stale detail badges from a previous detail page (different itemId)
-        // should be removed before placing the new one.
+        // Stale detail badges from a prior detail page should be removed.
         document.querySelectorAll('[data-jpi-detail]').forEach(function (el) {
             if (el.getAttribute('data-jpi-detail') !== itemId) el.remove();
         });
 
-        const cached = readCache(RESULT_PREFIX, makeResultKey(itemId));
-        if (cached) {
-            placeDetailBadge(itemId, cached.type, cached.reason);
-            return;
-        }
-
-        const cachedType = readCache(TYPE_PREFIX, itemId);
-        if (cachedType && !PLAYABLE_TYPES.has(cachedType.type)) return;
-
-        let p = inflight.get(itemId);
-        if (!p) {
-            p = enqueueLookup(itemId, (cachedType && cachedType.type) || null);
-            inflight.set(itemId, p);
-        }
-        p.then(function (result) {
-            if (destroyed || !result) return;
-            // Make sure we still show the same item (user may have navigated).
-            if (extractDetailItemId() !== itemId) return;
-            placeDetailBadge(itemId, result.type, result.reason);
-        }).catch(function () { /* silent */ });
+        getOrLookup(itemId, null, function () {
+            return extractDetailItemId() === itemId;
+        }).then(function (result) {
+            if (state.destroyed || !result) return;
+            placeBadge(null, itemId, result.type, result.reason, /*isDetail*/ true);
+        });
     }
 
     function extractDetailItemId() {
@@ -710,73 +702,45 @@
         return m ? m[1] : null;
     }
 
-    function placeDetailBadge(itemId, type, reason) {
-        const badge = BADGES[type];
-        if (!badge) return;
-
-        // Pick the most prominent visible spot we can find on the detail page.
-        const target = document.querySelector(
-            '.itemMiscInfo-primary, .itemMiscInfo, [class*="itemMiscInfo"], ' +
-            '.mainDetailButtons, [class*="mainDetailButtons"]'
-        );
-        if (!target) return;
-        if (target.querySelector('[data-jpi-detail="' + itemId + '"]')) return;
-
-        const span = document.createElement('span');
-        span.className = 'jpi-badge-detail ' + badge.cls;
-        span.setAttribute('data-jpi-detail', itemId);
-        span.setAttribute('title', badge.label + (reason ? ' — ' + reason : ''));
-        span.textContent = badge.icon + ' ' + badge.label;
-        target.appendChild(span);
-    }
-
-    // ─── Per-item processing ─────────────────────────────────────────────────
-
-    function processItem(el, itemId, hint) {
+    /**
+     * Returns a Promise<{type,reason}|null>. Reads result cache first; on
+     * miss, dedupes via the in-flight map and queues a lookup. The
+     * `stillRelevant` callback is invoked just before resolving; if it
+     * returns false (DOM gone, user navigated), resolves to null instead.
+     */
+    function getOrLookup(itemId, hint, stillRelevant) {
         const cached = readCache(RESULT_PREFIX, makeResultKey(itemId));
-        if (cached) {
-            placeBadge(el, itemId, cached.type, cached.reason);
-            return;
+        if (cached) return Promise.resolve(stillRelevant() ? cached : null);
+
+        const cachedType = readCache(TYPE_PREFIX, itemId);
+        if (cachedType && (cachedType.type === '' || NON_PLAYABLE_TYPES.has(cachedType.type))) {
+            return Promise.resolve(null);
         }
 
-        // Cached "non-playable" shortcut so we don't repeat type lookups.
-        const cachedType = readCache(TYPE_PREFIX, itemId);
-        if (cachedType && !PLAYABLE_TYPES.has(cachedType.type)) return;
-
-        // Dedupe in-flight by itemId so the same item isn't looked up twice
-        // when it appears in multiple grids on the same page.
-        let p = inflight.get(itemId);
+        let p = state.inflight.get(itemId);
         if (!p) {
             p = enqueueLookup(itemId, hint || (cachedType && cachedType.type) || null);
-            inflight.set(itemId, p);
+            state.inflight.set(itemId, p);
+            p.then(function () { state.inflight.delete(itemId); },
+                   function () { state.inflight.delete(itemId); });
         }
-
-        p.then(function (result) {
-            if (destroyed || !result) return;
-            if (!document.body.contains(el)) return;
-            placeBadge(el, itemId, result.type, result.reason);
-        }).catch(function () { /* silent */ });
+        return p.then(function (r) { return stillRelevant() ? r : null; },
+                      function () { return null; });
     }
 
     function enqueueLookup(itemId, hint) {
         return new Promise(function (resolve) {
-            lookupQueue.push({ itemId: itemId, hint: hint, resolve: resolve });
+            state.lookupQueue.push({ itemId: itemId, hint: hint, resolve: resolve });
             drainQueue();
         });
     }
 
     function drainQueue() {
-        while (activeLookups < MAX_CONCURRENT_LOOKUPS && lookupQueue.length > 0) {
-            const job = lookupQueue.shift();
-            activeLookups++;
-            runLookup(job.itemId, job.hint).then(function (result) {
-                job.resolve(result);
-            }, function () {
-                job.resolve(null);
-            }).then(function () {
-                activeLookups--;
-                drainQueue();
-            });
+        while (state.activeLookups < MAX_CONCURRENT_LOOKUPS && state.lookupQueue.length > 0) {
+            const job = state.lookupQueue.shift();
+            state.activeLookups++;
+            runLookup(job.itemId, job.hint).then(job.resolve, function () { job.resolve(null); })
+                .then(function () { state.activeLookups--; drainQueue(); });
         }
     }
 
@@ -789,100 +753,89 @@
             });
 
         return typePromise.then(function (type) {
-            if (!PLAYABLE_TYPES.has(type)) return null;
+            if (type !== 'Movie' && type !== 'Episode') return null;
+            if (!isPlayableTypeAllowed(type)) return null;
             return fetchPlaybackInfo(itemId).then(function (result) {
-                writeCache(RESULT_PREFIX, makeResultKey(itemId), result, RESULT_TTL_MS);
+                writeCache(RESULT_PREFIX, makeResultKey(itemId), result, config.resultTtlMs);
                 return result;
             });
         });
     }
 
-    // ─── Jellyfin API calls ─────────────────────────────────────────────────
+    // ─── Type batching ──────────────────────────────────────────────────────
 
-    function authHeader() {
-        const ac = window.ApiClient;
-        const token = (ac.accessToken && ac.accessToken()) || '';
-        const deviceId = (ac.deviceId && ac.deviceId()) || '';
-        const clientName = ac._clientName || 'Jellyfin Web';
-        const clientVersion = ac._clientVersion || '10.11.0';
-        const deviceName = ac._deviceName || 'Browser';
-        return 'MediaBrowser Client="' + clientName + '", Device="' + deviceName +
-            '", DeviceId="' + deviceId + '", Version="' + clientVersion +
-            '", Token="' + token + '"';
-    }
-
-    function serverAddress() {
-        const ac = window.ApiClient;
-        return ac._serverAddress || (ac.serverAddress ? ac.serverAddress() : '');
-    }
-
+    /**
+     * Coalesce per-item type lookups into a single GET /Users/{u}/Items?Ids=
+     * call. Library pages with 50 cards used to issue 50 type requests; now
+     * we batch them inside an 80ms window.
+     */
     function fetchType(itemId) {
         return new Promise(function (resolve, reject) {
-            const ac = window.ApiClient;
-            const userId = ac.getCurrentUserId();
-            const url = serverAddress() + '/Users/' + userId + '/Items/' + itemId +
-                '?Fields=MediaSources';
-            const xhr = new XMLHttpRequest();
-            xhr.timeout = 6000;
-            xhr.onload = function () {
-                if (xhr.status >= 200 && xhr.status < 300) {
-                    try {
-                        const data = JSON.parse(xhr.responseText);
-                        resolve(data.Type || '');
-                    } catch (_) { reject(new Error('parse')); }
-                } else { reject(new Error('http ' + xhr.status)); }
-            };
-            xhr.onerror = function () { reject(new Error('net')); };
-            xhr.ontimeout = function () { reject(new Error('timeout')); };
-            xhr.open('GET', url, true);
-            xhr.setRequestHeader('X-JPI-Self', '1');
-            xhr.setRequestHeader('X-Emby-Authorization', authHeader());
-            xhr.send();
+            if (!state.typeBatch) {
+                state.typeBatch = { ids: [], waiters: new Map(), timer: null };
+            }
+            const batch = state.typeBatch;
+            const existing = batch.waiters.get(itemId);
+            if (existing) {
+                existing.push({ resolve: resolve, reject: reject });
+                return;
+            }
+            batch.waiters.set(itemId, [{ resolve: resolve, reject: reject }]);
+            batch.ids.push(itemId);
+            if (!batch.timer) batch.timer = setTimeout(flushTypeBatch, TYPE_BATCH_WINDOW_MS);
         });
     }
 
-    function fetchPlaybackInfo(itemId) {
-        return new Promise(function (resolve, reject) {
-            const ac = window.ApiClient;
-            const userId = ac.getCurrentUserId();
-            const body = JSON.stringify({
-                UserId: userId,
-                DeviceProfile: getDeviceProfile(),
-                MaxStreamingBitrate: 120000000,
-                StartTimeTicks: 0,
-                IsPlayback: false,
-                AutoOpenLiveStream: false
+    function flushTypeBatch() {
+        const batch = state.typeBatch;
+        state.typeBatch = null;
+        if (!batch || batch.ids.length === 0) return;
+
+        const userId = (window.ApiClient && window.ApiClient.getCurrentUserId()) || '';
+        const path = '/Users/' + userId + '/Items?Limit=' + batch.ids.length +
+            '&Ids=' + batch.ids.join(',') + '&Fields=';
+
+        apiCall('GET', path).then(function (resp) {
+            const byId = new Map();
+            const items = (resp && resp.Items) || [];
+            for (let i = 0; i < items.length; i++) byId.set(items[i].Id, items[i].Type || '');
+            batch.ids.forEach(function (id) {
+                const type = byId.get(id) || '';
+                (batch.waiters.get(id) || []).forEach(function (w) { w.resolve(type); });
             });
-            const url = serverAddress() + '/Items/' + itemId + '/PlaybackInfo';
-            const xhr = new XMLHttpRequest();
-            xhr.timeout = 9000;
-            xhr.onload = function () {
-                if (xhr.status >= 200 && xhr.status < 300) {
-                    try {
-                        resolve(parsePlaybackResponse(JSON.parse(xhr.responseText)));
-                    } catch (_) { reject(new Error('parse')); }
-                } else { reject(new Error('http ' + xhr.status)); }
-            };
-            xhr.onerror = function () { reject(new Error('net')); };
-            xhr.ontimeout = function () { reject(new Error('timeout')); };
-            xhr.open('POST', url, true);
-            xhr.setRequestHeader('X-JPI-Self', '1'); // tell sniffer to skip
-            xhr.setRequestHeader('Content-Type', 'application/json');
-            xhr.setRequestHeader('X-Emby-Authorization', authHeader());
-            xhr.send(body);
+        }, function (err) {
+            batch.ids.forEach(function (id) {
+                (batch.waiters.get(id) || []).forEach(function (w) { w.reject(err); });
+            });
         });
+    }
+
+    // ─── Playback info + parsing ────────────────────────────────────────────
+
+    function fetchPlaybackInfo(itemId) {
+        const userId = window.ApiClient.getCurrentUserId();
+        const profile = getDeviceProfile();
+        const body = {
+            UserId: userId,
+            DeviceProfile: profile,
+            MaxStreamingBitrate: 120000000,
+            StartTimeTicks: 0,
+            IsPlayback: false,
+            AutoOpenLiveStream: false
+        };
+        return apiCall('POST', '/Items/' + itemId + '/PlaybackInfo', { body: body, timeoutMs: 9000 })
+            .then(function (resp) { return parsePlaybackResponse(resp, profile); });
     }
 
     /**
-     * Pick the best media source and translate the server's decision into a
-     * badge. We trust the server's SupportsDirectPlay/Stream/Transcoding
-     * flags — they reflect a real evaluation against the device profile.
+     * Translate the server's flags into a badge. We trust SupportsDirectPlay
+     * / SupportsDirectStream / SupportsTranscoding — they reflect a real
+     * evaluation against the device profile we just sent.
      */
-    function parsePlaybackResponse(resp) {
+    function parsePlaybackResponse(resp, profile) {
         const sources = resp.MediaSources || [];
-        if (sources.length === 0) return { type: 'transcode', reason: 'no media sources' };
+        if (sources.length === 0) return { type: TYPE.TRANSCODE, reason: 'no media sources' };
 
-        // Prefer the source the server thinks is most usable.
         const src = sources.find(function (s) { return s.SupportsDirectPlay; }) ||
                     sources.find(function (s) { return s.SupportsDirectStream; }) ||
                     sources[0];
@@ -892,36 +845,28 @@
         const video = getStreamCodec(src, 'Video');
 
         if (src.SupportsDirectPlay) {
-            return {
-                type: 'direct',
-                reason: container + ' / ' + (video || '?') + ' / ' + (audio || '?')
-            };
+            return { type: TYPE.DIRECT, reason: container + ' / ' + (video || '?') + ' / ' + (audio || '?') };
         }
 
         if (src.SupportsDirectStream) {
-            // SupportsDirectStream covers both Re-mux (container repackaged
-            // but video AND audio kept native — lossless, cheap) and audio-
-            // transcode (video kept native, audio re-encoded). The flag
-            // doesn't distinguish them, so we infer by checking whether the
-            // source audio codec is in the device profile's audio whitelist.
-            const audioNative = audioCodecInProfile(audio, getDeviceProfile());
-
-            if (audioNative) {
+            // SupportsDirectStream covers two cases: Re-mux (audio also kept
+            // native) and audio-transcode. The flag doesn't distinguish, so
+            // we infer from the audio whitelist on the device profile.
+            if (audioCodecInProfile(audio, profile)) {
                 return {
-                    type: 'remux',
+                    type: TYPE.REMUX,
                     reason: container + ' → playable container; ' +
                         (video || '?') + ' + ' + (audio || '?') + ' kept native'
                 };
             }
-
             if (audio && FRAGILE_AUDIO.has(audio)) {
                 return {
-                    type: 'transcode',
+                    type: TYPE.TRANSCODE,
                     reason: 'remux + ' + audio.toUpperCase() + ' audio (often fails on browsers)'
                 };
             }
             return {
-                type: 'stream',
+                type: TYPE.STREAM,
                 reason: 'video direct, audio transcode (' + (audio || '?') + ')' +
                     ' — note: audio re-encode with -c:v copy can stall on long-GOP sources or multichannel audio; full transcode is sometimes faster on a fast CPU'
             };
@@ -930,13 +875,33 @@
         if (src.SupportsTranscoding) {
             const reasons = humanizeTranscodeReasons(src.TranscodeReasons, src) ||
                 ('video ' + (video || '?') + ', audio ' + (audio || '?'));
-            return { type: 'transcode', reason: reasons };
+            return { type: TYPE.TRANSCODE, reason: reasons };
         }
 
-        return { type: 'transcode', reason: 'not playable on this device' };
+        return { type: TYPE.TRANSCODE, reason: 'not playable on this device' };
     }
 
-    // ─── TranscodeReason → human-readable mapping ───────────────────────────
+    function getStreamCodec(src, type) {
+        const s = (src.MediaStreams || []).find(function (m) { return m.Type === type; });
+        return s ? (s.Codec || '').toLowerCase() : null;
+    }
+
+    function audioCodecInProfile(audio, profile) {
+        if (!audio || !profile) return false;
+        const target = audio.toLowerCase();
+        const profiles = profile.DirectPlayProfiles || [];
+        for (let i = 0; i < profiles.length; i++) {
+            const list = (profiles[i].AudioCodec || '').toLowerCase();
+            if (!list) continue;
+            const codecs = list.split(',');
+            for (let j = 0; j < codecs.length; j++) {
+                if (codecs[j].trim() === target) return true;
+            }
+        }
+        return false;
+    }
+
+    // ─── TranscodeReason → human strings ────────────────────────────────────
 
     const TRANSCODE_REASON_LABELS = {
         ContainerNotSupported:        'container {container} not supported',
@@ -968,11 +933,6 @@
         UnknownAudioStreamInfo:       'audio stream metadata unknown'
     };
 
-    /**
-     * Turn the raw TranscodeReason enum array into a friendly tooltip string,
-     * substituting actual codec/bitrate/resolution values from the source's
-     * MediaStreams when the template references them.
-     */
     function humanizeTranscodeReasons(reasons, src) {
         if (!Array.isArray(reasons) || reasons.length === 0) return '';
 
@@ -980,17 +940,17 @@
         const videoStream = (src.MediaStreams || []).find(function (s) { return s.Type === 'Video'; }) || {};
 
         const ctx = {
-            container:     (src.Container || '').toLowerCase(),
-            videoCodec:    (videoStream.Codec || '').toLowerCase(),
-            videoProfile:  videoStream.Profile || '',
-            videoLevel:    videoStream.Level || '',
-            videoBitrate:  formatBitrate(videoStream.BitRate),
-            videoFps:      videoStream.AverageFrameRate || videoStream.RealFrameRate || '',
-            videoSize:     (videoStream.Width && videoStream.Height) ? videoStream.Width + 'x' + videoStream.Height : '',
-            videoBitDepth: videoStream.BitDepth ? videoStream.BitDepth + '-bit' : '',
+            container:      (src.Container || '').toLowerCase(),
+            videoCodec:     (videoStream.Codec || '').toLowerCase(),
+            videoProfile:   videoStream.Profile || '',
+            videoLevel:     videoStream.Level || '',
+            videoBitrate:   formatBitrate(videoStream.BitRate),
+            videoFps:       videoStream.AverageFrameRate || videoStream.RealFrameRate || '',
+            videoSize:      (videoStream.Width && videoStream.Height) ? videoStream.Width + 'x' + videoStream.Height : '',
+            videoBitDepth:  videoStream.BitDepth ? videoStream.BitDepth + '-bit' : '',
             videoRangeType: videoStream.VideoRangeType || videoStream.VideoRange || '',
-            audioCodec:    (audioStream.Codec || '').toLowerCase(),
-            audioChannels: audioStream.Channels ? audioStream.Channels + 'ch' : ''
+            audioCodec:     (audioStream.Codec || '').toLowerCase(),
+            audioChannels:  audioStream.Channels ? audioStream.Channels + 'ch' : ''
         };
 
         const seen = {};
@@ -1010,32 +970,59 @@
         return b + ' bps';
     }
 
-    function getStreamCodec(src, type) {
-        const s = (src.MediaStreams || []).find(function (m) { return m.Type === type; });
-        return s ? (s.Codec || '').toLowerCase() : null;
+    // ─── API helpers ────────────────────────────────────────────────────────
+
+    function getDeviceId() {
+        const ac = window.ApiClient;
+        return (ac && ac.deviceId && ac.deviceId()) || '';
+    }
+
+    function authHeader() {
+        const ac = window.ApiClient;
+        const token = (ac.accessToken && ac.accessToken()) || '';
+        const clientName = ac._clientName || 'Jellyfin Web';
+        const clientVersion = ac._clientVersion || '10.11.0';
+        const deviceName = ac._deviceName || 'Browser';
+        return 'MediaBrowser Client="' + clientName + '", Device="' + deviceName +
+            '", DeviceId="' + getDeviceId() + '", Version="' + clientVersion +
+            '", Token="' + token + '"';
+    }
+
+    function serverAddress() {
+        const ac = window.ApiClient;
+        return ac._serverAddress || (ac.serverAddress ? ac.serverAddress() : '');
     }
 
     /**
-     * True if `audio` (lower-case codec name) appears in any DirectPlayProfile
-     * audio whitelist of the supplied device profile. Used to distinguish
-     * Re-mux (audio native) from Direct Stream (audio gets transcoded).
+     * Single XHR helper for every API call we make. opts: { body, timeoutMs }.
      */
-    function audioCodecInProfile(audio, profile) {
-        if (!audio || !profile) return false;
-        const target = audio.toLowerCase();
-        const profiles = profile.DirectPlayProfiles || [];
-        for (let i = 0; i < profiles.length; i++) {
-            const list = (profiles[i].AudioCodec || '').toLowerCase();
-            if (!list) continue;
-            const codecs = list.split(',');
-            for (let j = 0; j < codecs.length; j++) {
-                if (codecs[j].trim() === target) return true;
+    function apiCall(method, path, opts) {
+        opts = opts || {};
+        return new Promise(function (resolve, reject) {
+            const xhr = new XMLHttpRequest();
+            xhr.timeout = opts.timeoutMs || 6000;
+            xhr.onload = function () {
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    if (!xhr.responseText) return resolve(null);
+                    try { resolve(JSON.parse(xhr.responseText)); }
+                    catch (_) { reject(new Error('parse')); }
+                } else { reject(new Error('http ' + xhr.status)); }
+            };
+            xhr.onerror = function () { reject(new Error('net')); };
+            xhr.ontimeout = function () { reject(new Error('timeout')); };
+            xhr.open(method, serverAddress() + path, true);
+            xhr.setRequestHeader('X-JPI-Self', '1'); // tell sniffer to skip
+            xhr.setRequestHeader('X-Emby-Authorization', authHeader());
+            if (opts.body !== undefined) {
+                xhr.setRequestHeader('Content-Type', 'application/json');
+                xhr.send(typeof opts.body === 'string' ? opts.body : JSON.stringify(opts.body));
+            } else {
+                xhr.send();
             }
-        }
-        return false;
+        });
     }
 
-    // ─── Badge DOM ───────────────────────────────────────────────────────────
+    // ─── Badge DOM ──────────────────────────────────────────────────────────
 
     function injectStyles() {
         if (document.getElementById('jpi-styles')) return;
@@ -1077,46 +1064,63 @@
         (document.head || document.documentElement).appendChild(css);
     }
 
-    function createBadge(type, itemId, reason, isOverlay) {
+    /**
+     * Build a badge span. `mode` is 'overlay' (card image), 'inline' (list
+     * row), or 'detail' (item details page misc-info row).
+     */
+    function createBadge(type, itemId, reason, mode) {
         const badge = BADGES[type];
         if (!badge) return null;
         const span = document.createElement('span');
-        span.className = (isOverlay ? 'jpi-badge-overlay ' : 'jpi-badge-inline ') + badge.cls;
-        span.setAttribute('data-jpi', itemId);
+        const classByMode = {
+            overlay: 'jpi-badge-overlay',
+            inline:  'jpi-badge-inline',
+            detail:  'jpi-badge-detail'
+        };
+        span.className = (classByMode[mode] || classByMode.inline) + ' ' + badge.cls;
+        span.setAttribute(mode === 'detail' ? 'data-jpi-detail' : 'data-jpi', itemId);
         span.setAttribute('title', badge.label + (reason ? ' — ' + reason : ''));
         span.textContent = badge.icon + ' ' + badge.label;
         return span;
     }
 
     function isCardElement(el) {
-        if (el.querySelector('.cardImageContainer, [class*="cardImage"], [class*="CardImage"]')) return true;
+        if (el.querySelector(CARD_IMAGE_SELECTOR)) return true;
         const cls = typeof el.className === 'string' ? el.className : '';
-        return /card/i.test(cls);
+        return /\bcard\b/i.test(cls);
     }
 
-    function placeBadge(el, itemId, type, reason) {
-        if (el.tagName === 'BUTTON' || el.closest('button')) return;
-        if (el.querySelector('[data-jpi="' + itemId + '"]')) return;
-
-        if (isCardElement(el)) {
-            const imgContainer = el.querySelector(
-                '.cardImageContainer, [class*="cardImage"], [class*="CardImage"], ' +
-                '.cardBox, [class*="cardBox"]'
-            );
-            // Never place inside an overlay button even if it looks like an
-            // image container.
-            const target = (imgContainer && !imgContainer.closest('button')) ? imgContainer : el;
-            const computed = window.getComputedStyle(target);
-            if (computed.position === 'static') target.style.position = 'relative';
-            const badge = createBadge(type, itemId, reason, true);
+    /**
+     * Place a badge for a card / list row / detail page. When isDetail is
+     * true, `el` is ignored and the badge is inserted into the detail page's
+     * misc-info row.
+     */
+    function placeBadge(el, itemId, type, reason, isDetail) {
+        if (isDetail) {
+            const target = document.querySelector(DETAIL_TARGET_SELECTOR);
+            if (!target) return;
+            if (target.querySelector('[data-jpi-detail="' + itemId + '"]')) return;
+            const badge = createBadge(type, itemId, reason, 'detail');
             if (badge) target.appendChild(badge);
             return;
         }
 
-        const rowBody = el.querySelector(
-            '.listItemBody, [class*="listItemBody"], [class*="episodeBody"], .itemBody'
-        );
-        const badge = createBadge(type, itemId, reason, false);
+        if (!el || el.tagName === 'BUTTON' || el.closest('button')) return;
+        if (el.querySelector('[data-jpi="' + itemId + '"]')) return;
+
+        if (isCardElement(el)) {
+            const imgContainer = el.querySelector(PLACE_TARGET_SELECTOR);
+            const target = (imgContainer && !imgContainer.closest('button')) ? imgContainer : el;
+            if (window.getComputedStyle(target).position === 'static') {
+                target.style.position = 'relative';
+            }
+            const badge = createBadge(type, itemId, reason, 'overlay');
+            if (badge) target.appendChild(badge);
+            return;
+        }
+
+        const rowBody = el.querySelector(LIST_BODY_SELECTOR);
+        const badge = createBadge(type, itemId, reason, 'inline');
         if (!badge) return;
         if (rowBody && rowBody.parentNode) {
             rowBody.parentNode.insertBefore(badge, rowBody.nextSibling);

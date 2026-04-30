@@ -9,6 +9,14 @@
     "imageUrl": "https://raw.githubusercontent.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/main/icon.png",
     "versions": [
       {
+        "changelog": "Refactor + cleanup pass. Plugin Configuration (Cache TTL, Show on Movies, Show on Episodes) is now actually honored at runtime — previously the settings were saved but ignored. Cache page works again (was reading stale jpi_v3_ keys when JS writes jpi_v6_) and now includes Re-mux in the badge label and shows the correct deviceId column. Per-item type lookups are batched into one /Items?Ids= request per scan window. Single shared XHR helper replaces 3 copies of XHR boilerplate. Device profile is mirrored into module memory so we don't reparse localStorage every prediction. Cheap profile fingerprint replaces 30KB JSON.stringify churn on profile updates. MutationObserver now ignores changes that don't touch [data-id]. Stale-badge sweep only runs when removals happen. inflight map no longer leaks. URL-poll setInterval dropped in favor of popstate/hashchange listeners. Plugin.cs file IO consolidated into one helper with the same error handling.",
+        "targetAbi": "10.11.0",
+        "version": "0.5.0.0",
+        "sourceUrl": "https://github.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/releases/download/0.5.0.0/Jellyfin.Plugin.PlaybackIndicator_0.5.0.0.zip",
+        "checksum": "015f582bf69c8366a8b8b4f54858ccdf",
+        "timestamp": "2026-04-30"
+      },
+      {
         "changelog": "Tooltip clarity pass. The ❌ Transcode badge now shows human-readable reasons like 'video codec hevc not supported' / 'HDR variant DOVI not supported' / 'audio channel count 6ch not supported' instead of raw enum names like 'VideoCodecNotSupported, AudioChannelsNotSupported'. Codec / bitrate / resolution / channel values are pulled from the item's MediaStreams. The ⚠️ Direct Stream tooltip now warns that audio re-encode with -c:v copy can stall on long-GOP sources and multichannel audio (full transcode is sometimes faster on a fast CPU — confirmed by Jellyfin issues #6557, #13039, #15430).",
         "targetAbi": "10.11.0",
         "version": "0.4.8.0",

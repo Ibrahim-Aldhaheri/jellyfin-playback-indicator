@@ -57,7 +57,10 @@
     <script type="text/javascript">
         (function () {
             var pluginId = 'b6f3e2a1-d4c5-4e7a-8b3f-9e2d1c0a8b5e';
-            var CACHE_PREFIX = 'jpi_v3_';
+            // Keep in sync with playback-indicator.js RESULT_PREFIX / ALL_PREFIXES.
+            var RESULT_PREFIX = 'jpi_v6_';
+            var ALL_JPI_PREFIXES = ['jpi_v2_', 'jpi_v3_', 'jpi_v4_', 'jpi_v5_', 'jpi_v6_',
+                                    'jpi_type_', 'jpi_profile', 'jpi_real_profile'];
             var page = document.querySelector('#PlaybackIndicatorConfigPage');
 
             function loadConfig() {
@@ -86,7 +89,12 @@
             });
 
             document.getElementById('btnClearCache').addEventListener('click', function () {
-                var keys = Object.keys(localStorage).filter(function (k) { return k.startsWith(CACHE_PREFIX); });
+                var keys = Object.keys(localStorage).filter(function (k) {
+                    for (var i = 0; i < ALL_JPI_PREFIXES.length; i++) {
+                        if (k.indexOf(ALL_JPI_PREFIXES[i]) === 0) return true;
+                    }
+                    return false;
+                });
                 keys.forEach(function (k) { localStorage.removeItem(k); });
                 refreshCacheTable();
                 Dashboard.alert('Cleared ' + keys.length + ' cache entries.');
@@ -98,6 +106,7 @@
 
             function badgeLabel(type) {
                 if (type === 'direct') return 'Direct';
+                if (type === 'remux') return 'Re-mux';
                 if (type === 'stream') return 'Stream';
                 if (type === 'transcode') return 'Transcode';
                 return type || '?';
@@ -108,7 +117,7 @@
                 var emptyMsg = document.getElementById('cacheEmptyMsg');
                 tbody.textContent = '';
 
-                var keys = Object.keys(localStorage).filter(function (k) { return k.startsWith(CACHE_PREFIX); });
+                var keys = Object.keys(localStorage).filter(function (k) { return k.startsWith(RESULT_PREFIX); });
 
                 if (keys.length === 0) {
                     emptyMsg.style.display = 'block';
@@ -119,10 +128,10 @@
                 keys.forEach(function (fullKey) {
                     try {
                         var entry = JSON.parse(localStorage.getItem(fullKey));
-                        var suffix = fullKey.substring(CACHE_PREFIX.length);
-                        var parts = suffix.split('_');
+                        // Key format: {prefix}{itemId}_{userId}_{deviceId}_{codecFp}
+                        var parts = fullKey.substring(RESULT_PREFIX.length).split('_');
                         var itemId = parts[0] || '';
-                        var deviceId = parts[1] || '';
+                        var deviceId = parts[2] || '';
                         var data = entry.data || {};
                         var expires = entry.expires ? new Date(entry.expires).toLocaleString() : '?';
 

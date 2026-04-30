@@ -65,91 +65,68 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
     private string IndexHtmlPath => Path.Combine(_appPaths.WebPath, "index.html");
 
     /// <summary>
-    /// Idempotently inject the loader script into index.html. If the file
-    /// doesn't exist, isn't writable, or anything else goes wrong, log and
-    /// return without throwing.
+    /// Idempotently inject the loader script into index.html.
     /// </summary>
     private void InjectLoader()
     {
-        var indexPath = IndexHtmlPath;
-        if (!File.Exists(indexPath))
+        TransformIndexHtml("inject", stripped =>
         {
-            _logger.LogWarning("Playback Indicator: index.html not found at {Path}; skipping injection", indexPath);
-            return;
-        }
-
-        string content;
-        try
-        {
-            content = File.ReadAllText(indexPath);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Playback Indicator: cannot read index.html; skipping injection");
-            return;
-        }
-
-        // Strip every existing block (handles re-runs and old marker variants).
-        var stripped = InjectionBlockRegex.Replace(content, string.Empty);
-
-        const string closingBody = "</body>";
-        var closeIdx = stripped.LastIndexOf(closingBody, StringComparison.OrdinalIgnoreCase);
-        if (closeIdx < 0)
-        {
-            _logger.LogWarning("Playback Indicator: index.html has no </body>; skipping injection");
-            return;
-        }
-
-        var block = $"{StartMarker}\n{ScriptTag}\n{EndMarker}\n";
-        var newContent = stripped.Insert(closeIdx, block);
-
-        if (newContent == content)
-        {
-            return; // already correct, nothing to do
-        }
-
-        if (!TryAtomicWrite(indexPath, newContent, out var writeError))
-        {
-            _logger.LogWarning(writeError, "Playback Indicator: failed to update index.html");
-            return;
-        }
-
-        _logger.LogInformation("Playback Indicator: loader injected into {Path}", indexPath);
+            const string closingBody = "</body>";
+            var closeIdx = stripped.LastIndexOf(closingBody, StringComparison.OrdinalIgnoreCase);
+            if (closeIdx < 0)
+            {
+                _logger.LogWarning("Playback Indicator: index.html has no </body>; skipping injection");
+                return null;
+            }
+            return stripped.Insert(closeIdx, $"{StartMarker}\n{ScriptTag}\n{EndMarker}\n");
+        });
     }
 
     /// <summary>
-    /// Remove our script block (and any legacy variants) from index.html on
-    /// uninstall. Failure is logged but never thrown.
+    /// Remove our script block (and any legacy variants) from index.html on uninstall.
     /// </summary>
     public override void OnUninstalling()
+    {
+        TransformIndexHtml("uninject", stripped => stripped);
+    }
+
+    /// <summary>
+    /// Read index.html, strip any prior injection block, hand the result to
+    /// the transform, write the transform's output atomically. All IO and
+    /// transform errors are logged but never thrown — file IO must never
+    /// abort plugin loading.
+    /// </summary>
+    private void TransformIndexHtml(string verb, Func<string, string?> transform)
     {
         var indexPath = IndexHtmlPath;
         if (!File.Exists(indexPath))
         {
+            _logger.LogWarning("Playback Indicator: index.html not found at {Path}; skipping {Verb}", indexPath, verb);
             return;
         }
 
+        string original;
         try
         {
-            var content = File.ReadAllText(indexPath);
-            if (!InjectionBlockRegex.IsMatch(content))
-            {
-                return;
-            }
-
-            var stripped = InjectionBlockRegex.Replace(content, string.Empty);
-            if (TryAtomicWrite(indexPath, stripped, out var writeError))
-            {
-                _logger.LogInformation("Playback Indicator: loader removed from {Path}", indexPath);
-            }
-            else
-            {
-                _logger.LogWarning(writeError, "Playback Indicator: failed to remove loader on uninstall");
-            }
+            original = File.ReadAllText(indexPath);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Playback Indicator: error removing loader on uninstall");
+            _logger.LogWarning(ex, "Playback Indicator: cannot read index.html; skipping {Verb}", verb);
+            return;
+        }
+
+        var stripped = InjectionBlockRegex.Replace(original, string.Empty);
+        var newContent = transform(stripped);
+        if (newContent is null || newContent == original) return;
+
+        if (TryAtomicWrite(indexPath, newContent, out var writeError))
+        {
+            _logger.LogInformation("Playback Indicator: index.html {Verb} succeeded ({Path})", verb, indexPath);
+        }
+        else
+        {
+            _logger.LogWarning(writeError, "Playback Indicator: index.html {Verb} failed", verb);
         }
     }
 
