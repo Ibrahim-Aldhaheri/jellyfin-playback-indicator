@@ -9,6 +9,14 @@
     "imageUrl": "https://raw.githubusercontent.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/main/icon.png",
     "versions": [
       {
+        "changelog": "Tooltip clarity pass. The ❌ Transcode badge now shows human-readable reasons like 'video codec hevc not supported' / 'HDR variant DOVI not supported' / 'audio channel count 6ch not supported' instead of raw enum names like 'VideoCodecNotSupported, AudioChannelsNotSupported'. Codec / bitrate / resolution / channel values are pulled from the item's MediaStreams. The ⚠️ Direct Stream tooltip now warns that audio re-encode with -c:v copy can stall on long-GOP sources and multichannel audio (full transcode is sometimes faster on a fast CPU — confirmed by Jellyfin issues #6557, #13039, #15430).",
+        "targetAbi": "10.11.0",
+        "version": "0.4.8.0",
+        "sourceUrl": "https://github.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/releases/download/0.4.8.0/Jellyfin.Plugin.PlaybackIndicator_0.4.8.0.zip",
+        "checksum": "c818852bd8b1ec76baf059763ef96ae5",
+        "timestamp": "2026-04-30"
+      },
+      {
         "changelog": "Add badge to the item details page (movie / episode) so the user doesn't have to navigate away to see the predicted playback method. Inserted into the item misc-info row next to year / runtime / rating; falls back to the action-button row if the misc row isn't present. Reuses the existing per-item lookup and cache, so opening a detail page for an item that's already been badged in a grid is instant.",
         "targetAbi": "10.11.0",
         "version": "0.4.7.0",

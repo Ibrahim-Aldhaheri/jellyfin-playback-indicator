@@ -1,5 +1,5 @@
 /**
- * Jellyfin Playback Indicator v0.4.7
+ * Jellyfin Playback Indicator v0.4.8
  *
  * Shows Direct Play / Re-mux / Direct Stream / Transcode badges for items.
  *
@@ -26,13 +26,13 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.4.7';
+    const VERSION = '0.4.8';
 
-    const RESULT_PREFIX = 'jpi_v5_';
+    const RESULT_PREFIX = 'jpi_v6_';
     const TYPE_PREFIX = 'jpi_type_';
     const PROFILE_KEY = 'jpi_profile';
     const ALL_PREFIXES = [
-        'jpi_v2_', 'jpi_v3_', 'jpi_v4_', 'jpi_v5_',
+        'jpi_v2_', 'jpi_v3_', 'jpi_v4_', 'jpi_v5_', 'jpi_v6_',
         'jpi_type_', 'jpi_profile', 'jpi_real_profile'
     ];
 
@@ -922,18 +922,92 @@
             }
             return {
                 type: 'stream',
-                reason: 'video direct, audio transcode (' + (audio || '?') + ')'
+                reason: 'video direct, audio transcode (' + (audio || '?') + ')' +
+                    ' — note: audio re-encode with -c:v copy can stall on long-GOP sources or multichannel audio; full transcode is sometimes faster on a fast CPU'
             };
         }
 
         if (src.SupportsTranscoding) {
-            const reasons = (src.TranscodeReasons && src.TranscodeReasons.length)
-                ? src.TranscodeReasons.join(', ')
-                : ('video ' + (video || '?') + ', audio ' + (audio || '?'));
+            const reasons = humanizeTranscodeReasons(src.TranscodeReasons, src) ||
+                ('video ' + (video || '?') + ', audio ' + (audio || '?'));
             return { type: 'transcode', reason: reasons };
         }
 
         return { type: 'transcode', reason: 'not playable on this device' };
+    }
+
+    // ─── TranscodeReason → human-readable mapping ───────────────────────────
+
+    const TRANSCODE_REASON_LABELS = {
+        ContainerNotSupported:        'container {container} not supported',
+        VideoCodecNotSupported:       'video codec {videoCodec} not supported',
+        VideoBitrateNotSupported:     'video bitrate {videoBitrate} exceeds device limit',
+        VideoBitrate:                 'video bitrate exceeds limit',
+        VideoFramerateNotSupported:   'video framerate {videoFps} fps not supported',
+        VideoLevelNotSupported:       'video level {videoLevel} not supported',
+        VideoProfileNotSupported:     'video profile {videoProfile} not supported',
+        VideoResolutionNotSupported:  'video resolution {videoSize} not supported',
+        VideoBitDepthNotSupported:    'video bit depth {videoBitDepth} not supported',
+        VideoRangeNotSupported:       'HDR / Dolby Vision not supported',
+        VideoRangeTypeNotSupported:   'HDR variant {videoRangeType} not supported',
+        VideoCodecTagNotSupported:    'video codec tag not supported',
+        RefFramesNotSupported:        'too many video reference frames',
+        AnamorphicVideoNotSupported:  'anamorphic video not supported',
+        InterlacedVideoNotSupported:  'interlaced video not supported',
+        AudioCodecNotSupported:       'audio codec {audioCodec} not supported',
+        AudioBitrateNotSupported:     'audio bitrate exceeds device limit',
+        AudioChannelsNotSupported:    'audio channel count {audioChannels} not supported',
+        AudioProfileNotSupported:     'audio profile not supported',
+        AudioSampleRateNotSupported:  'audio sample rate not supported',
+        AudioIsExternal:              'external audio track must be muxed in',
+        SecondaryAudioNotSupported:   'secondary audio track not supported',
+        SubtitleCodecNotSupported:    'subtitle format needs burn-in',
+        ContainerBitrateExceedsLimit: 'total bitrate exceeds device limit',
+        DirectPlayError:              'server reported a direct-play error',
+        UnknownVideoStreamInfo:       'video stream metadata unknown',
+        UnknownAudioStreamInfo:       'audio stream metadata unknown'
+    };
+
+    /**
+     * Turn the raw TranscodeReason enum array into a friendly tooltip string,
+     * substituting actual codec/bitrate/resolution values from the source's
+     * MediaStreams when the template references them.
+     */
+    function humanizeTranscodeReasons(reasons, src) {
+        if (!Array.isArray(reasons) || reasons.length === 0) return '';
+
+        const audioStream = (src.MediaStreams || []).find(function (s) { return s.Type === 'Audio'; }) || {};
+        const videoStream = (src.MediaStreams || []).find(function (s) { return s.Type === 'Video'; }) || {};
+
+        const ctx = {
+            container:     (src.Container || '').toLowerCase(),
+            videoCodec:    (videoStream.Codec || '').toLowerCase(),
+            videoProfile:  videoStream.Profile || '',
+            videoLevel:    videoStream.Level || '',
+            videoBitrate:  formatBitrate(videoStream.BitRate),
+            videoFps:      videoStream.AverageFrameRate || videoStream.RealFrameRate || '',
+            videoSize:     (videoStream.Width && videoStream.Height) ? videoStream.Width + 'x' + videoStream.Height : '',
+            videoBitDepth: videoStream.BitDepth ? videoStream.BitDepth + '-bit' : '',
+            videoRangeType: videoStream.VideoRangeType || videoStream.VideoRange || '',
+            audioCodec:    (audioStream.Codec || '').toLowerCase(),
+            audioChannels: audioStream.Channels ? audioStream.Channels + 'ch' : ''
+        };
+
+        const seen = {};
+        const out = [];
+        for (let i = 0; i < reasons.length; i++) {
+            const tmpl = TRANSCODE_REASON_LABELS[reasons[i]] || reasons[i];
+            const text = tmpl.replace(/\{(\w+)\}/g, function (_, k) { return ctx[k] || '?'; });
+            if (!seen[text]) { seen[text] = true; out.push(text); }
+        }
+        return out.join('; ');
+    }
+
+    function formatBitrate(b) {
+        if (!b || typeof b !== 'number') return '';
+        if (b >= 1000000) return (b / 1000000).toFixed(1) + ' Mbps';
+        if (b >= 1000)    return Math.round(b / 1000) + ' kbps';
+        return b + ' bps';
     }
 
     function getStreamCodec(src, type) {
