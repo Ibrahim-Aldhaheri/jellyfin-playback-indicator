@@ -9,6 +9,14 @@
     "imageUrl": "https://raw.githubusercontent.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/main/icon.png",
     "versions": [
       {
+        "changelog": "Add badge to the item details page (movie / episode) so the user doesn't have to navigate away to see the predicted playback method. Inserted into the item misc-info row next to year / runtime / rating; falls back to the action-button row if the misc row isn't present. Reuses the existing per-item lookup and cache, so opening a detail page for an item that's already been badged in a grid is instant.",
+        "targetAbi": "10.11.0",
+        "version": "0.4.7.0",
+        "sourceUrl": "https://github.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/releases/download/0.4.7.0/Jellyfin.Plugin.PlaybackIndicator_0.4.7.0.zip",
+        "checksum": "ceae400d5a4423a72353ffa5d3863bf8",
+        "timestamp": "2026-04-30"
+      },
+      {
         "changelog": "Add 🔁 Re-mux badge (blue): items where the container needs repackaging but both video AND audio stay native (lossless, very low CPU). Previously these were lumped under ⚠️ Direct Stream. Splits SupportsDirectStream by checking whether the source audio codec is in the device profile's audio whitelist. Bumped result-cache prefix so old badges get re-evaluated under the new four-way split.",
         "targetAbi": "10.11.0",
         "version": "0.4.6.0",

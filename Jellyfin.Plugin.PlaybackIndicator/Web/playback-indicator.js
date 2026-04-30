@@ -1,5 +1,5 @@
 /**
- * Jellyfin Playback Indicator v0.4.6
+ * Jellyfin Playback Indicator v0.4.7
  *
  * Shows Direct Play / Re-mux / Direct Stream / Transcode badges for items.
  *
@@ -26,7 +26,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.4.6';
+    const VERSION = '0.4.7';
 
     const RESULT_PREFIX = 'jpi_v5_';
     const TYPE_PREFIX = 'jpi_type_';
@@ -164,7 +164,7 @@
         clearInterval(urlPollTimer);
         const styles = document.getElementById('jpi-styles');
         if (styles) styles.remove();
-        document.querySelectorAll('[data-jpi]').forEach(function (b) { b.remove(); });
+        document.querySelectorAll('[data-jpi], [data-jpi-detail]').forEach(function (b) { b.remove(); });
         try {
             Object.keys(localStorage).forEach(function (k) {
                 for (let i = 0; i < ALL_PREFIXES.length; i++) {
@@ -291,7 +291,7 @@
         // Drop in-flight lookups too — they were issued with the old profile.
         inflight.clear();
         lookupQueue.length = 0;
-        document.querySelectorAll('[data-jpi]').forEach(function (b) { b.remove(); });
+        document.querySelectorAll('[data-jpi], [data-jpi-detail]').forEach(function (b) { b.remove(); });
     }
 
     /**
@@ -658,6 +658,76 @@
         for (let i = 0; i < candidates.length; i++) {
             processItem(candidates[i].el, candidates[i].el.getAttribute('data-id'), candidates[i].hint);
         }
+        processDetailPage();
+    }
+
+    // ─── Detail page badge ──────────────────────────────────────────────────
+
+    /**
+     * On the item details page (#/details?id=...) inject a badge in the misc
+     * info row so the user doesn't have to leave the page to see the
+     * predicted playback method.
+     */
+    function processDetailPage() {
+        const itemId = extractDetailItemId();
+        if (!itemId) return;
+        if (document.querySelector('[data-jpi-detail="' + itemId + '"]')) return;
+
+        // Stale detail badges from a previous detail page (different itemId)
+        // should be removed before placing the new one.
+        document.querySelectorAll('[data-jpi-detail]').forEach(function (el) {
+            if (el.getAttribute('data-jpi-detail') !== itemId) el.remove();
+        });
+
+        const cached = readCache(RESULT_PREFIX, makeResultKey(itemId));
+        if (cached) {
+            placeDetailBadge(itemId, cached.type, cached.reason);
+            return;
+        }
+
+        const cachedType = readCache(TYPE_PREFIX, itemId);
+        if (cachedType && !PLAYABLE_TYPES.has(cachedType.type)) return;
+
+        let p = inflight.get(itemId);
+        if (!p) {
+            p = enqueueLookup(itemId, (cachedType && cachedType.type) || null);
+            inflight.set(itemId, p);
+        }
+        p.then(function (result) {
+            if (destroyed || !result) return;
+            // Make sure we still show the same item (user may have navigated).
+            if (extractDetailItemId() !== itemId) return;
+            placeDetailBadge(itemId, result.type, result.reason);
+        }).catch(function () { /* silent */ });
+    }
+
+    function extractDetailItemId() {
+        const url = (window.location.hash || '') + ' ' +
+                    (window.location.pathname || '') + ' ' +
+                    (window.location.search || '');
+        if (!/[#/]details/i.test(url)) return null;
+        const m = url.match(/[?&]id=([0-9a-fA-F-]{16,})/);
+        return m ? m[1] : null;
+    }
+
+    function placeDetailBadge(itemId, type, reason) {
+        const badge = BADGES[type];
+        if (!badge) return;
+
+        // Pick the most prominent visible spot we can find on the detail page.
+        const target = document.querySelector(
+            '.itemMiscInfo-primary, .itemMiscInfo, [class*="itemMiscInfo"], ' +
+            '.mainDetailButtons, [class*="mainDetailButtons"]'
+        );
+        if (!target) return;
+        if (target.querySelector('[data-jpi-detail="' + itemId + '"]')) return;
+
+        const span = document.createElement('span');
+        span.className = 'jpi-badge-detail ' + badge.cls;
+        span.setAttribute('data-jpi-detail', itemId);
+        span.setAttribute('title', badge.label + (reason ? ' — ' + reason : ''));
+        span.textContent = badge.icon + ' ' + badge.label;
+        target.appendChild(span);
     }
 
     // ─── Per-item processing ─────────────────────────────────────────────────
@@ -915,6 +985,14 @@
             '  font-size: 10px; font-weight: 600; line-height: 1.4;',
             '  white-space: nowrap; cursor: default; flex-shrink: 0;',
             '  text-shadow: none; font-family: inherit !important;',
+            '  pointer-events: none !important;',
+            '}',
+            '.jpi-badge-detail {',
+            '  display: inline-flex; align-items: center; gap: 4px;',
+            '  margin: 0 0 0 12px; padding: 3px 9px; border-radius: 4px;',
+            '  font-size: 12px; font-weight: 600; line-height: 1.4;',
+            '  white-space: nowrap; vertical-align: middle;',
+            '  font-family: inherit !important;',
             '  pointer-events: none !important;',
             '}',
             '.jpi-direct { background: rgba(26,107,42,0.9); color: #fff; }',
