@@ -1,5 +1,5 @@
 /**
- * Jellyfin Playback Indicator v0.5.3
+ * Jellyfin Playback Indicator v0.5.4
  *
  * Shows Direct Play / Re-mux / Direct Stream / Transcode badges for items.
  *
@@ -21,7 +21,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.5.3';
+    const VERSION = '0.5.4';
     const PLUGIN_ID = 'b6f3e2a1-d4c5-4e7a-8b3f-9e2d1c0a8b5e';
 
     const RESULT_PREFIX = 'jpi_v8_';
@@ -261,6 +261,21 @@
         const isPlaybackUrl = function (u) {
             return u && /\/Items\/[A-Fa-f0-9-]+\/PlaybackInfo/.test(u);
         };
+        // jellyfin-web posts its full profile here right after connect.
+        // Catching it gives us the authoritative profile without waiting
+        // for the user to hit play — important on Android Mobile, where
+        // the NativeShell API path is fragile.
+        const isCapabilitiesUrl = function (u) {
+            return u && /\/Sessions\/Capabilities(\/Full)?(\?|$)/.test(u);
+        };
+
+        const inspect = function (method, url, body) {
+            const m = (method || '').toUpperCase();
+            if (m !== 'POST') return;
+            if (isPlaybackUrl(url) || isCapabilitiesUrl(url)) {
+                captureProfileFromBody(body);
+            }
+        };
 
         try {
             const origOpen = XMLHttpRequest.prototype.open;
@@ -277,11 +292,7 @@
                 return origSetHeader.apply(this, arguments);
             };
             XMLHttpRequest.prototype.send = function (body) {
-                if (!this.__jpiSelf && this.__jpiMethod &&
-                    this.__jpiMethod.toUpperCase() === 'POST' &&
-                    isPlaybackUrl(this.__jpiUrl)) {
-                    captureProfileFromBody(body);
-                }
+                if (!this.__jpiSelf) inspect(this.__jpiMethod, this.__jpiUrl, body);
                 return origSend.apply(this, arguments);
             };
         } catch (_) {}
@@ -292,12 +303,10 @@
                 window.fetch = function (input, init) {
                     try {
                         const url = typeof input === 'string' ? input : (input && input.url) || '';
-                        const method = ((init && init.method) || (input && input.method) || 'GET').toUpperCase();
+                        const method = ((init && init.method) || (input && input.method) || 'GET');
                         const isSelf = headerLookup(init && init.headers, 'X-JPI-Self') === '1' ||
                                        headerLookup(input && input.headers, 'X-JPI-Self') === '1';
-                        if (!isSelf && method === 'POST' && isPlaybackUrl(url)) {
-                            captureProfileFromBody(init && init.body);
-                        }
+                        if (!isSelf) inspect(method, url, init && init.body);
                     } catch (_) {}
                     return origFetch(input, init);
                 };
@@ -324,17 +333,12 @@
             if (!parsed) return;
 
             const dp = parsed.DeviceProfile;
-            if (isUsableProfile(dp) &&
-                dp.Name !== 'PlaybackIndicator Synthetic' &&
-                dp.Name !== 'PlaybackIndicator Synthetic (browser)' &&
-                dp.Name !== 'PlaybackIndicator Synthetic (native shell)') {
+            if (isUsableProfile(dp) && !isOurSyntheticName(dp.Name)) {
                 persistProfile(dp);
             }
 
-            // Real player calls also include the user's MaxStreamingBitrate
-            // (which respects the Display → Quality slider). Capture it so
-            // our prediction call uses the same cap; otherwise items above
-            // the user's bitrate cap would falsely show as DirectPlay.
+            // PlaybackInfo bodies also carry MaxStreamingBitrate (respects
+            // the Display → Quality slider). Capabilities bodies don't.
             const bitrate = parsed.MaxStreamingBitrate;
             if (typeof bitrate === 'number' && bitrate > 0 && bitrate !== state.maxBitrate) {
                 state.maxBitrate = bitrate;
@@ -343,6 +347,12 @@
                 scheduleScan(SCAN_DEBOUNCE_MS);
             }
         } catch (_) {}
+    }
+
+    function isOurSyntheticName(n) {
+        return n === 'PlaybackIndicator Synthetic' ||
+            n === 'PlaybackIndicator Synthetic (browser)' ||
+            n === 'PlaybackIndicator Synthetic (native shell)';
     }
 
     function loadPersistedBitrate() {
@@ -392,9 +402,17 @@
     }
 
     /**
-     * Ask the native shell. JMP and Android expose their actual profile via
-     * window.NativeShell.AppHost.getDeviceProfile() — same call jellyfin-web
-     * uses to start playback in those shells.
+     * Ask the native shell. Different shells have different signatures:
+     *  - JMP / desktop: getDeviceProfile() — returns the profile directly,
+     *    extra args are ignored.
+     *  - Android Mobile: getDeviceProfile(profileBuilder, version) — REQUIRES
+     *    a profileBuilder callback that produces a base browser profile;
+     *    the shell then layers its codec restrictions on top. Calling with
+     *    no args throws inside profileBuilder({...}).
+     *
+     * Strategy: pass a real profileBuilder (returns our browser-style
+     * synthetic) plus a version string. JMP ignores both; Android uses them
+     * and we get its real profile.
      */
     function getNativeShellProfile() {
         return new Promise(function (resolve) {
@@ -403,16 +421,29 @@
                 ? ah.getDeviceProfile.bind(ah) : null;
             if (!fn) { resolve(null); return; }
 
-            let result;
-            try { result = fn(); }
-            catch (_) { try { result = fn(null); } catch (__) { resolve(null); return; } }
-
+            const builder = function () { return buildBrowserSyntheticProfile(); };
             const accept = function (p) { resolve(isUsableProfile(p) ? p : null); };
-            if (result && typeof result.then === 'function') {
-                result.then(accept, function () { resolve(null); });
-            } else {
-                accept(result);
-            }
+
+            const tryArgs = function (args) {
+                try {
+                    const r = fn.apply(null, args);
+                    if (r && typeof r.then === 'function') {
+                        return r.then(function (v) { return v; });
+                    }
+                    return Promise.resolve(r);
+                } catch (e) { return Promise.reject(e); }
+            };
+
+            // With-builder first (covers Android Mobile); no-args second
+            // (covers JMP and any shell that returns the profile directly).
+            tryArgs([builder, '1.0.0'])
+                .then(function (p) {
+                    if (isUsableProfile(p)) accept(p);
+                    else tryArgs([]).then(accept).catch(function () { resolve(null); });
+                })
+                .catch(function () {
+                    tryArgs([]).then(accept).catch(function () { resolve(null); });
+                });
         });
     }
 
@@ -484,25 +515,34 @@
     }
 
     function buildSyntheticProfile() {
-        if (isNativeShell()) {
-            console.info('[PlaybackIndicator] native shell detected; using permissive synthetic profile');
-            return {
-                Name: 'PlaybackIndicator Synthetic (native shell)',
-                MaxStreamingBitrate: 200000000,
-                MaxStaticBitrate: 200000000,
-                DirectPlayProfiles: [{
-                    Container: 'mp4,m4v,mov,mkv,avi,wmv,3gp,3g2,m2ts,mts,ts,mpegts,asf,flv,vob,ogm,ogv,webm',
-                    Type: 'Video',
-                    VideoCodec: 'h264,h265,hevc,vp8,vp9,av1,mpeg4,mpeg2video,vc1,wmv3',
-                    AudioCodec: 'aac,mp3,ac3,eac3,dts,dca,truehd,mlp,flac,opus,vorbis,wma,wmav2,pcm,pcm_s16le,pcm_s24le'
-                }],
-                TranscodingProfiles: [{
-                    Container: 'ts', Type: 'Video', VideoCodec: 'h264',
-                    AudioCodec: 'aac,mp3,ac3', Context: 'Streaming', Protocol: 'hls'
-                }]
-            };
-        }
+        return isNativeShell()
+            ? buildNativeShellSyntheticProfile()
+            : buildBrowserSyntheticProfile();
+    }
 
+    function buildNativeShellSyntheticProfile() {
+        console.info('[PlaybackIndicator] native shell detected; using permissive synthetic profile');
+        return {
+            Name: 'PlaybackIndicator Synthetic (native shell)',
+            MaxStreamingBitrate: 200000000,
+            MaxStaticBitrate: 200000000,
+            DirectPlayProfiles: [{
+                Container: 'mp4,m4v,mov,mkv,avi,wmv,3gp,3g2,m2ts,mts,ts,mpegts,asf,flv,vob,ogm,ogv,webm',
+                Type: 'Video',
+                VideoCodec: 'h264,h265,hevc,vp8,vp9,av1,mpeg4,mpeg2video,vc1,wmv3',
+                AudioCodec: 'aac,mp3,ac3,eac3,dts,dca,truehd,mlp,flac,opus,vorbis,wma,wmav2,pcm,pcm_s16le,pcm_s24le'
+            }],
+            TranscodingProfiles: [{
+                Container: 'ts', Type: 'Video', VideoCodec: 'h264',
+                AudioCodec: 'aac,mp3,ac3', Context: 'Streaming', Protocol: 'hls'
+            }],
+            CodecProfiles: [],
+            ContainerProfiles: [],
+            SubtitleProfiles: []
+        };
+    }
+
+    function buildBrowserSyntheticProfile() {
         const probe = canPlayProbe();
         const supportsHevc = probe('video/mp4; codecs="hvc1"') || probe('video/mp4; codecs="hev1"');
         const supportsVP9 = probe('video/webm; codecs="vp9"');
@@ -518,9 +558,6 @@
 
         const audioCodecs = ['aac', 'mp3', 'opus', 'flac', 'vorbis'];
         if (supportsAC3) audioCodecs.push('ac3', 'eac3');
-
-        console.info('[PlaybackIndicator] no captured profile; browser synthetic video=' +
-            videoCodecs.join('/') + ' audio=' + audioCodecs.join('/'));
 
         return {
             Name: 'PlaybackIndicator Synthetic (browser)',
@@ -539,7 +576,10 @@
             TranscodingProfiles: [{
                 Container: 'ts', Type: 'Video', VideoCodec: 'h264',
                 AudioCodec: 'aac,mp3', Context: 'Streaming', Protocol: 'hls'
-            }]
+            }],
+            CodecProfiles: [],
+            ContainerProfiles: [],
+            SubtitleProfiles: []
         };
     }
 

@@ -9,6 +9,14 @@
     "imageUrl": "https://raw.githubusercontent.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/main/icon.png",
     "versions": [
       {
+        "changelog": "Fix wrong predictions on Jellyfin Mobile (Android). The Android shell's NativeShell.AppHost.getDeviceProfile(profileBuilder, version) requires a profileBuilder callback to construct the base profile; calling it with no args (as we did for JMP) threw inside profileBuilder({...}), and although the code fell back to /Sessions, that depends on jellyfin-web having posted capabilities first which can race. Now we pass a real profileBuilder that returns a browser-shape synthetic — JMP ignores it, Android uses it and we get its real profile. Also broadened the XHR/fetch sniffer to capture POST /Sessions/Capabilities/Full bodies (the authoritative profile that jellyfin-web posts on connect, fires earlier than any playback call). Synthetic profile builders split into named browser/native-shell variants so the builder we pass into the shell is unambiguous, and both now include empty CodecProfiles/ContainerProfiles/SubtitleProfiles arrays so the Android shell's filter() calls don't crash.",
+        "targetAbi": "10.11.0",
+        "version": "0.5.4.0",
+        "sourceUrl": "https://github.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/releases/download/0.5.4.0/Jellyfin.Plugin.PlaybackIndicator_0.5.4.0.zip",
+        "checksum": "1a21839dd5dc2d3be556412425727901",
+        "timestamp": "2026-05-01"
+      },
+      {
         "changelog": "Two fixes. (1) Hover tooltips on the badges now actually fire. v0.5.0's CSS set 'pointer-events: none !important;' on the badge spans so they wouldn't intercept clicks meant for the card — but that also disabled hover, so the native title tooltip never appeared. Re-enabled pointer-events; clicks on the badge still bubble up to the card so navigation isn't broken. (2) Plugin now respects the user's MaxStreamingBitrate setting (Settings → Display → Quality). Was previously hardcoded to 120 Mbps in the prediction call, so items above the user's bitrate cap could falsely show ✅ Direct Play even though the real player would force a transcode. Now sniffed from real player calls (same mechanism as the device profile capture) and persisted to localStorage; result cache invalidates on bitrate change.",
         "targetAbi": "10.11.0",
         "version": "0.5.3.0",
