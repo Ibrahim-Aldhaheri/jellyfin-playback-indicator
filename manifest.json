@@ -9,6 +9,14 @@
     "imageUrl": "https://raw.githubusercontent.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/main/icon.png",
     "versions": [
       {
+        "changelog": "Two long-standing visual bugs fixed. (1) Icons no longer drop out on Jellyfin Media Player and other Qt WebEngine builds without a color-emoji font. The badge glyphs (✅🔁⚠️❌) were emoji code points; on builds with no emoji font they fell back to monochrome boxes or just disappeared. Replaced all four with inline SVG paths (color via currentColor) that render identically in every webview. (2) Hover tooltips now actually fire everywhere. The native HTML title attribute was unreliable across JMP / themed Jellyfin / Mobile webviews even after v0.5.3 re-enabled pointer events. Replaced with a custom JS tooltip driven by one delegated set of mouseover/mousemove/mouseout listeners on document.body — no longer depends on the browser rendering native title tooltips at all. Native title attribute kept for accessibility / screen-reader fallback.",
+        "targetAbi": "10.11.0",
+        "version": "0.5.6.0",
+        "sourceUrl": "https://github.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/releases/download/0.5.6.0/Jellyfin.Plugin.PlaybackIndicator_0.5.6.0.zip",
+        "checksum": "350afd4a955c685349f8a6a587d03fe6",
+        "timestamp": "2026-05-03"
+      },
+      {
         "changelog": "Tighten native-shell detection so isNativeShell() catches Samsung Tizen and LG webOS via UA / ApiClient._clientName even when window.NativeShell hasn't loaded by the time our boot fires (slower TV browsers). v0.5.4 already routed those clients through the right code path because it always tries (profileBuilder, version) first, but this hardens the synthetic-fallback branch too. Also a README rewrite: 'How It Works' now reflects the actual four-source profile chain (NativeShell → /Sessions → sniffer → synthetic) and the MaxStreamingBitrate sniff; 'A note on Direct Stream' replaced with current Re-mux/Direct Stream split + the browser-MKV-stall caveat; new 'Supported Clients' table makes it explicit which clients can run the plugin (any browser, JMP, Jellyfin Mobile, Tizen, webOS) vs which can't (Swiftfin, native AndroidTV, Roku — no webview).",
         "targetAbi": "10.11.0",
         "version": "0.5.5.0",

@@ -1,5 +1,5 @@
 /**
- * Jellyfin Playback Indicator v0.5.5
+ * Jellyfin Playback Indicator v0.5.6
  *
  * Shows Direct Play / Re-mux / Direct Stream / Transcode badges for items.
  *
@@ -21,7 +21,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.5.5';
+    const VERSION = '0.5.6';
     const PLUGIN_ID = 'b6f3e2a1-d4c5-4e7a-8b3f-9e2d1c0a8b5e';
 
     const RESULT_PREFIX = 'jpi_v8_';
@@ -45,11 +45,28 @@
         DIRECT: 'direct', REMUX: 'remux', STREAM: 'stream', TRANSCODE: 'transcode'
     });
 
+    // SVG icons — emoji glyphs (✅🔁⚠️❌) drop out on Qt WebEngine builds
+    // (JMP) when no color-emoji font is installed; inline SVG renders the
+    // same in every webview.
+    const ICON_SVG = {
+        check: '<svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true" focusable="false">' +
+               '<path d="M3 8.6l3 3 7-7.6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+        cycle: '<svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true" focusable="false">' +
+               '<path d="M14 8.5a6 6 0 1 1-1.8-4.3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>' +
+               '<path d="M13.5 1.5v3.6h-3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+        warn:  '<svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true" focusable="false">' +
+               '<path d="M8 1.5l7 12.5h-14z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>' +
+               '<path d="M8 6v3.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>' +
+               '<circle cx="8" cy="11.7" r="0.9" fill="currentColor"/></svg>',
+        cross: '<svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true" focusable="false">' +
+               '<path d="M3 3l10 10M13 3L3 13" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>'
+    };
+
     const BADGES = {
-        [TYPE.DIRECT]:    { cls: 'jpi-direct',    icon: '✅', label: 'Direct Play' },
-        [TYPE.REMUX]:     { cls: 'jpi-remux',     icon: '🔁', label: 'Re-mux' },
-        [TYPE.STREAM]:    { cls: 'jpi-stream',    icon: '⚠️', label: 'Direct Stream' },
-        [TYPE.TRANSCODE]: { cls: 'jpi-transcode', icon: '❌', label: 'Transcode' }
+        [TYPE.DIRECT]:    { cls: 'jpi-direct',    icon: ICON_SVG.check, label: 'Direct Play' },
+        [TYPE.REMUX]:     { cls: 'jpi-remux',     icon: ICON_SVG.cycle, label: 'Re-mux' },
+        [TYPE.STREAM]:    { cls: 'jpi-stream',    icon: ICON_SVG.warn,  label: 'Direct Stream' },
+        [TYPE.TRANSCODE]: { cls: 'jpi-transcode', icon: ICON_SVG.cross, label: 'Transcode' }
     };
 
     const NON_PLAYABLE_TYPES = new Set([
@@ -93,7 +110,8 @@
         activeLookups: 0,
         lookupQueue: [],
         typeBatch: null,           // { ids:[], waiters:Map, timer }
-        sweepNeeded: false         // set when DOM nodes were removed
+        sweepNeeded: false,        // set when DOM nodes were removed
+        tooltipEl: null            // lazy-created custom tooltip element
     };
 
     // ─── Boot ───────────────────────────────────────────────────────────────
@@ -204,6 +222,89 @@
         };
         window.addEventListener('popstate', onNav);
         window.addEventListener('hashchange', onNav);
+
+        attachTooltipHandlers();
+    }
+
+    // ─── Custom tooltip ─────────────────────────────────────────────────────
+
+    /**
+     * Native HTML title tooltips don't always fire — Qt WebEngine builds
+     * (JMP) sometimes skip them, some Jellyfin themes intercept hover, and
+     * pointer-events on parents can swallow the event entirely. Drive a
+     * custom tooltip from one delegated handler on document.body so we don't
+     * depend on any of that.
+     */
+    function attachTooltipHandlers() {
+        const targetSelector = '[data-jpi-tooltip]';
+
+        document.body.addEventListener('mouseover', function (e) {
+            const el = e.target.closest && e.target.closest(targetSelector);
+            if (!el) return;
+            const text = el.getAttribute('data-jpi-tooltip');
+            if (!text) return;
+            showTooltip(text, e.clientX, e.clientY);
+        }, true);
+
+        document.body.addEventListener('mousemove', function (e) {
+            if (!state.tooltipEl || state.tooltipEl.style.display === 'none') return;
+            const el = e.target.closest && e.target.closest(targetSelector);
+            if (!el) { hideTooltip(); return; }
+            positionTooltip(e.clientX, e.clientY);
+        }, true);
+
+        document.body.addEventListener('mouseout', function (e) {
+            const from = e.target.closest && e.target.closest(targetSelector);
+            if (!from) return;
+            const to = e.relatedTarget && e.relatedTarget.closest
+                ? e.relatedTarget.closest(targetSelector) : null;
+            if (to !== from) hideTooltip();
+        }, true);
+
+        // Hide on scroll / blur / click — common reasons the cursor "leaves"
+        // without firing mouseout (touch-scroll on mobile webview, etc.).
+        window.addEventListener('scroll', hideTooltip, true);
+        window.addEventListener('blur', hideTooltip);
+        document.body.addEventListener('click', hideTooltip, true);
+    }
+
+    function ensureTooltipEl() {
+        if (state.tooltipEl) return state.tooltipEl;
+        const el = document.createElement('div');
+        el.className = 'jpi-tooltip';
+        el.style.display = 'none';
+        document.body.appendChild(el);
+        state.tooltipEl = el;
+        return el;
+    }
+
+    function showTooltip(text, x, y) {
+        const el = ensureTooltipEl();
+        el.textContent = text;
+        el.style.display = 'block';
+        positionTooltip(x, y);
+    }
+
+    function positionTooltip(x, y) {
+        const el = state.tooltipEl;
+        if (!el) return;
+        // Render off-screen first to measure
+        el.style.left = '-9999px';
+        el.style.top = '-9999px';
+        const w = el.offsetWidth;
+        const h = el.offsetHeight;
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        let left = x + 14;
+        let top = y + 14;
+        if (left + w > vw - 4) left = Math.max(4, x - w - 14);
+        if (top + h > vh - 4) top = Math.max(4, y - h - 14);
+        el.style.left = left + 'px';
+        el.style.top = top + 'px';
+    }
+
+    function hideTooltip() {
+        if (state.tooltipEl) state.tooltipEl.style.display = 'none';
     }
 
     function mutationTouchesItems(m) {
@@ -232,6 +333,7 @@
         clearTimeout(state.scanTimer);
         const styles = document.getElementById('jpi-styles');
         if (styles) styles.remove();
+        if (state.tooltipEl) { state.tooltipEl.remove(); state.tooltipEl = null; }
         document.querySelectorAll('[data-jpi], [data-jpi-detail]').forEach(function (b) { b.remove(); });
         removeKeysWithPrefixes(ALL_PREFIXES);
     };
@@ -1175,7 +1277,20 @@
             '.jpi-direct { background: rgba(26,107,42,0.9); color: #fff; }',
             '.jpi-remux { background: rgba(40,110,180,0.9); color: #fff; }',
             '.jpi-stream { background: rgba(122,95,0,0.9); color: #fff; }',
-            '.jpi-transcode { background: rgba(139,26,26,0.9); color: #fff; }'
+            '.jpi-transcode { background: rgba(139,26,26,0.9); color: #fff; }',
+            '.jpi-icon { display: inline-flex; align-items: center; line-height: 1; }',
+            '.jpi-icon svg { display: block; }',
+            '.jpi-label { display: inline-block; }',
+            '.jpi-tooltip {',
+            '  position: fixed; z-index: 99999; max-width: 360px;',
+            '  padding: 6px 10px; border-radius: 4px;',
+            '  background: rgba(0,0,0,0.92); color: #fff;',
+            '  font-size: 12px; line-height: 1.4;',
+            '  font-family: inherit;',
+            '  box-shadow: 0 2px 8px rgba(0,0,0,0.5);',
+            '  pointer-events: none;',
+            '  white-space: normal;',
+            '}'
         ].join('\n');
         (document.head || document.documentElement).appendChild(css);
     }
@@ -1183,20 +1298,34 @@
     /**
      * Build a badge span. `mode` is 'overlay' (card image), 'inline' (list
      * row), or 'detail' (item details page misc-info row).
+     *
+     * Icon is inline SVG (renders identically in every webview, including
+     * Qt WebEngine builds without a color-emoji font). The full reason is
+     * stored in data-jpi-tooltip and surfaced by our delegated tooltip
+     * handler; the title attribute is kept as an accessibility / fallback.
      */
     function createBadge(type, itemId, reason, mode) {
         const badge = BADGES[type];
         if (!badge) return null;
-        const span = document.createElement('span');
+
         const classByMode = {
             overlay: 'jpi-badge-overlay',
             inline:  'jpi-badge-inline',
             detail:  'jpi-badge-detail'
         };
+
+        const span = document.createElement('span');
         span.className = (classByMode[mode] || classByMode.inline) + ' ' + badge.cls;
         span.setAttribute(mode === 'detail' ? 'data-jpi-detail' : 'data-jpi', itemId);
-        span.setAttribute('title', badge.label + (reason ? ' — ' + reason : ''));
-        span.textContent = badge.icon + ' ' + badge.label;
+
+        const tooltipText = badge.label + (reason ? ' — ' + reason : '');
+        span.setAttribute('title', tooltipText);
+        span.setAttribute('data-jpi-tooltip', tooltipText);
+
+        // innerHTML is safe here — we control both the SVG (constant) and
+        // the label (constant). reason isn't injected into HTML.
+        span.innerHTML = '<span class="jpi-icon">' + badge.icon + '</span>' +
+                         '<span class="jpi-label">' + badge.label + '</span>';
         return span;
     }
 
