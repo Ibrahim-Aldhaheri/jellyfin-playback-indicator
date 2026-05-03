@@ -1,5 +1,5 @@
 /**
- * Jellyfin Playback Indicator v0.5.4
+ * Jellyfin Playback Indicator v0.5.5
  *
  * Shows Direct Play / Re-mux / Direct Stream / Transcode badges for items.
  *
@@ -21,7 +21,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.5.4';
+    const VERSION = '0.5.5';
     const PLUGIN_ID = 'b6f3e2a1-d4c5-4e7a-8b3f-9e2d1c0a8b5e';
 
     const RESULT_PREFIX = 'jpi_v8_';
@@ -500,16 +500,22 @@
     }
 
     /**
-     * True if running inside a native-shell wrapper (JMP, Android) where
-     * canPlayType() doesn't reflect actual playback capability.
+     * True if running inside a native-shell wrapper (JMP, Android Mobile,
+     * Samsung Tizen, LG webOS) where canPlayType() doesn't reflect actual
+     * playback capability — those shells dispatch decoding to ExoPlayer /
+     * native TV pipelines and inject window.NativeShell. The UA / client
+     * name checks are a backup in case window.NativeShell hasn't loaded by
+     * the time our boot fires (slow TV browsers).
      */
     function isNativeShell() {
         if (window.NativeShell) return true;
         const ua = (navigator.userAgent || '').toLowerCase();
-        if (/jellyfin-?media-?player|jellyfinandroid/.test(ua)) return true;
+        if (/jellyfin-?media-?player|jellyfinandroid|tizen|webos|smart-?tv|smarttv|netcast/.test(ua)) {
+            return true;
+        }
         try {
             const name = ((window.ApiClient && window.ApiClient._clientName) || '').toLowerCase();
-            return /jellyfin\s*media\s*player|jellyfin.?mobile|jellyfin.?android|mpv\s*shim/.test(name);
+            return /jellyfin\s*media\s*player|jellyfin.?mobile|jellyfin.?android|jellyfin.?tizen|jellyfin.?webos|samsung|lg|mpv\s*shim/.test(name);
         } catch (_) {}
         return false;
     }
