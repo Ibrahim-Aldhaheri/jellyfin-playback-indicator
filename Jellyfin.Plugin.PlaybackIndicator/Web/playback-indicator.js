@@ -1,5 +1,5 @@
 /**
- * Jellyfin Playback Indicator v0.5.6
+ * Jellyfin Playback Indicator v0.5.7
  *
  * Shows Direct Play / Re-mux / Direct Stream / Transcode badges for items.
  *
@@ -21,7 +21,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.5.6';
+    const VERSION = '0.5.7';
     const PLUGIN_ID = 'b6f3e2a1-d4c5-4e7a-8b3f-9e2d1c0a8b5e';
 
     const RESULT_PREFIX = 'jpi_v8_';
@@ -111,7 +111,8 @@
         lookupQueue: [],
         typeBatch: null,           // { ids:[], waiters:Map, timer }
         sweepNeeded: false,        // set when DOM nodes were removed
-        tooltipEl: null            // lazy-created custom tooltip element
+        tooltipEl: null,           // lazy-created custom tooltip element
+        tooltipHideTimer: null     // touch auto-hide timer
     };
 
     // ─── Boot ───────────────────────────────────────────────────────────────
@@ -238,6 +239,7 @@
     function attachTooltipHandlers() {
         const targetSelector = '[data-jpi-tooltip]';
 
+        // Mouse path (desktop / JMP).
         document.body.addEventListener('mouseover', function (e) {
             const el = e.target.closest && e.target.closest(targetSelector);
             if (!el) return;
@@ -261,11 +263,26 @@
             if (to !== from) hideTooltip();
         }, true);
 
-        // Hide on scroll / blur / click — common reasons the cursor "leaves"
+        // Touch path (Android Mobile, iPad/iPhone Safari): tap a badge to
+        // show the tooltip for ~4s. Tap anywhere else to dismiss. We let
+        // the touch event continue to propagate so navigation still works
+        // when the user taps the surrounding card.
+        document.body.addEventListener('touchstart', function (e) {
+            const touch = e.touches && e.touches[0];
+            if (!touch) return;
+            const el = e.target.closest && e.target.closest(targetSelector);
+            if (!el) { hideTooltip(); return; }
+            const text = el.getAttribute('data-jpi-tooltip');
+            if (!text) return;
+            showTooltip(text, touch.clientX, touch.clientY);
+            clearTimeout(state.tooltipHideTimer);
+            state.tooltipHideTimer = setTimeout(hideTooltip, 4000);
+        }, { passive: true, capture: true });
+
+        // Hide on scroll / blur — common reasons the cursor "leaves"
         // without firing mouseout (touch-scroll on mobile webview, etc.).
         window.addEventListener('scroll', hideTooltip, true);
         window.addEventListener('blur', hideTooltip);
-        document.body.addEventListener('click', hideTooltip, true);
     }
 
     function ensureTooltipEl() {
@@ -1120,35 +1137,43 @@
     // ─── TranscodeReason → human strings ────────────────────────────────────
 
     const TRANSCODE_REASON_LABELS = {
-        ContainerNotSupported:        'container {container} not supported',
-        VideoCodecNotSupported:       'video codec {videoCodec} not supported',
-        VideoBitrateNotSupported:     'video bitrate {videoBitrate} exceeds device limit',
-        VideoBitrate:                 'video bitrate exceeds limit',
-        VideoFramerateNotSupported:   'video framerate {videoFps} fps not supported',
-        VideoLevelNotSupported:       'video level {videoLevel} not supported',
-        VideoProfileNotSupported:     'video profile {videoProfile} not supported',
-        VideoResolutionNotSupported:  'video resolution {videoSize} not supported',
-        VideoBitDepthNotSupported:    'video bit depth {videoBitDepth} not supported',
-        VideoRangeNotSupported:       'HDR / Dolby Vision not supported',
-        VideoRangeTypeNotSupported:   'HDR variant {videoRangeType} not supported',
-        VideoCodecTagNotSupported:    'video codec tag not supported',
-        RefFramesNotSupported:        'too many video reference frames',
-        AnamorphicVideoNotSupported:  'anamorphic video not supported',
-        InterlacedVideoNotSupported:  'interlaced video not supported',
-        AudioCodecNotSupported:       'audio codec {audioCodec} not supported',
-        AudioBitrateNotSupported:     'audio bitrate exceeds device limit',
-        AudioChannelsNotSupported:    'audio channel count {audioChannels} not supported',
-        AudioProfileNotSupported:     'audio profile not supported',
-        AudioSampleRateNotSupported:  'audio sample rate not supported',
-        AudioIsExternal:              'external audio track must be muxed in',
-        SecondaryAudioNotSupported:   'secondary audio track not supported',
-        SubtitleCodecNotSupported:    'subtitle format needs burn-in',
-        ContainerBitrateExceedsLimit: 'total bitrate exceeds device limit',
-        DirectPlayError:              'server reported a direct-play error',
-        UnknownVideoStreamInfo:       'video stream metadata unknown',
-        UnknownAudioStreamInfo:       'audio stream metadata unknown'
+        ContainerNotSupported:        { affects: 'container', text: 'container {container} not supported' },
+        VideoCodecNotSupported:       { affects: 'video',     text: 'video codec {videoCodec} not supported' },
+        VideoBitrateNotSupported:     { affects: 'video',     text: 'video bitrate {videoBitrate} exceeds device limit' },
+        VideoBitrate:                 { affects: 'video',     text: 'video bitrate exceeds limit' },
+        VideoFramerateNotSupported:   { affects: 'video',     text: 'video framerate {videoFps} fps not supported' },
+        VideoLevelNotSupported:       { affects: 'video',     text: 'video level {videoLevel} not supported' },
+        VideoProfileNotSupported:     { affects: 'video',     text: 'video profile {videoProfile} not supported' },
+        VideoResolutionNotSupported:  { affects: 'video',     text: 'video resolution {videoSize} not supported' },
+        VideoBitDepthNotSupported:    { affects: 'video',     text: 'video bit depth {videoBitDepth} not supported' },
+        VideoRangeNotSupported:       { affects: 'video',     text: 'HDR / Dolby Vision not supported' },
+        VideoRangeTypeNotSupported:   { affects: 'video',     text: 'HDR variant {videoRangeType} not supported' },
+        VideoCodecTagNotSupported:    { affects: 'video',     text: 'video codec tag not supported' },
+        RefFramesNotSupported:        { affects: 'video',     text: 'too many video reference frames' },
+        AnamorphicVideoNotSupported:  { affects: 'video',     text: 'anamorphic video not supported' },
+        InterlacedVideoNotSupported:  { affects: 'video',     text: 'interlaced video not supported' },
+        UnknownVideoStreamInfo:       { affects: 'video',     text: 'video stream metadata unknown' },
+        AudioCodecNotSupported:       { affects: 'audio',     text: 'audio codec {audioCodec} not supported' },
+        AudioBitrateNotSupported:     { affects: 'audio',     text: 'audio bitrate exceeds device limit' },
+        AudioChannelsNotSupported:    { affects: 'audio',     text: 'audio channel count {audioChannels} not supported' },
+        AudioProfileNotSupported:     { affects: 'audio',     text: 'audio profile not supported' },
+        AudioSampleRateNotSupported:  { affects: 'audio',     text: 'audio sample rate not supported' },
+        AudioIsExternal:              { affects: 'audio',     text: 'external audio track must be muxed in' },
+        SecondaryAudioNotSupported:   { affects: 'audio',     text: 'secondary audio track not supported' },
+        UnknownAudioStreamInfo:       { affects: 'audio',     text: 'audio stream metadata unknown' },
+        SubtitleCodecNotSupported:    { affects: 'subtitle',  text: 'subtitle format needs burn-in' },
+        ContainerBitrateExceedsLimit: { affects: 'container', text: 'total bitrate exceeds device limit' },
+        DirectPlayError:              { affects: 'other',     text: 'server reported a direct-play error' }
     };
 
+    /**
+     * Turn the raw TranscodeReason array into a tooltip string of the form:
+     *   "video re-encoded, audio re-encoded: video codec hevc not supported;
+     *    audio channel count 6ch not supported"
+     * The summary prefix tells the user *what* is being transcoded
+     * (video / audio / both / +container / +subtitle) without forcing them
+     * to parse the detail list.
+     */
     function humanizeTranscodeReasons(reasons, src) {
         if (!Array.isArray(reasons) || reasons.length === 0) return '';
 
@@ -1169,14 +1194,29 @@
             audioChannels:  audioStream.Channels ? audioStream.Channels + 'ch' : ''
         };
 
+        const affected = { video: false, audio: false, container: false, subtitle: false, other: false };
         const seen = {};
         const out = [];
         for (let i = 0; i < reasons.length; i++) {
-            const tmpl = TRANSCODE_REASON_LABELS[reasons[i]] || reasons[i];
+            const def = TRANSCODE_REASON_LABELS[reasons[i]];
+            const tmpl = def ? def.text : reasons[i];
             const text = tmpl.replace(/\{(\w+)\}/g, function (_, k) { return ctx[k] || '?'; });
+            if (def) affected[def.affects] = true;
+            else affected.other = true;
             if (!seen[text]) { seen[text] = true; out.push(text); }
         }
-        return out.join('; ');
+
+        const summary = summarizeAffectedStreams(affected);
+        return summary ? summary + ': ' + out.join('; ') : out.join('; ');
+    }
+
+    function summarizeAffectedStreams(a) {
+        const parts = [];
+        if (a.video) parts.push('video re-encoded');
+        if (a.audio) parts.push('audio re-encoded');
+        if (a.container) parts.push('container changed');
+        if (a.subtitle) parts.push('subtitles burned in');
+        return parts.join(', ');
     }
 
     function formatBitrate(b) {
@@ -1302,7 +1342,9 @@
      * Icon is inline SVG (renders identically in every webview, including
      * Qt WebEngine builds without a color-emoji font). The full reason is
      * stored in data-jpi-tooltip and surfaced by our delegated tooltip
-     * handler; the title attribute is kept as an accessibility / fallback.
+     * handler. We use aria-label (not title) for accessibility — title
+     * triggers the browser's native tooltip and Jellyfin's own UI tooltip
+     * layer, both of which would compete with our custom one.
      */
     function createBadge(type, itemId, reason, mode) {
         const badge = BADGES[type];
@@ -1319,8 +1361,9 @@
         span.setAttribute(mode === 'detail' ? 'data-jpi-detail' : 'data-jpi', itemId);
 
         const tooltipText = badge.label + (reason ? ' — ' + reason : '');
-        span.setAttribute('title', tooltipText);
         span.setAttribute('data-jpi-tooltip', tooltipText);
+        span.setAttribute('aria-label', tooltipText);
+        span.setAttribute('role', 'img');
 
         // innerHTML is safe here — we control both the SVG (constant) and
         // the label (constant). reason isn't injected into HTML.
