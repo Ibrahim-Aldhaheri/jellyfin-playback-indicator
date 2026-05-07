@@ -9,6 +9,14 @@
     "imageUrl": "https://raw.githubusercontent.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/main/icon.png",
     "versions": [
       {
+        "changelog": "Fix tooltip not showing on Android tap. v0.5.7 added a touchstart handler but the synthesized click that follows the tap still propagated to the card, so the page navigated away before the tooltip could render. Now intercepts the click in capture phase, stops propagation + preventDefault, then shows a sticky tooltip that stays for 6 seconds (or until you tap the badge again to toggle off, or tap elsewhere to dismiss). The same handler covers desktop click — clicking a badge no longer navigates the card, it shows the tooltip. Hover behavior on desktop unchanged. Touch position captured from touchstart so the synthesized click can position the tooltip even when its clientX/Y is 0 (Android quirk). Scroll-hide has a 500ms grace window so Android's touch-scroll doesn't yank the tooltip the moment it opens.",
+        "targetAbi": "10.11.0",
+        "version": "0.5.8.0",
+        "sourceUrl": "https://github.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/releases/download/0.5.8.0/Jellyfin.Plugin.PlaybackIndicator_0.5.8.0.zip",
+        "checksum": "dcadf022bdaa26b8eb2356dd8dee5719",
+        "timestamp": "2026-05-07"
+      },
+      {
         "changelog": "Three fixes. (1) Drop the duplicate native tooltip — v0.5.6 set both the title attribute and our own data-jpi-tooltip, so Jellyfin's UI fired the native title tooltip on top of our custom one. Now only data-jpi-tooltip is used; title is replaced with aria-label so screen readers still announce the badge. (2) Tap-to-show on touch devices (Android Mobile, iPhone/iPad Safari) — the custom tooltip used to be hover-only, so it never fired on touchscreens. Now a tap on the badge shows the tooltip for 4 seconds; tap elsewhere to dismiss. (3) Transcode tooltip now leads with what's actually being transcoded — 'video re-encoded, audio re-encoded: ...' or 'video re-encoded, container changed: ...' — so the user can see at a glance whether it's video, audio, both, or container that's incompatible without parsing the detailed reason list.",
         "targetAbi": "10.11.0",
         "version": "0.5.7.0",

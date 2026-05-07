@@ -1,5 +1,5 @@
 /**
- * Jellyfin Playback Indicator v0.5.7
+ * Jellyfin Playback Indicator v0.5.8
  *
  * Shows Direct Play / Re-mux / Direct Stream / Transcode badges for items.
  *
@@ -21,7 +21,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.5.7';
+    const VERSION = '0.5.8';
     const PLUGIN_ID = 'b6f3e2a1-d4c5-4e7a-8b3f-9e2d1c0a8b5e';
 
     const RESULT_PREFIX = 'jpi_v8_';
@@ -112,7 +112,12 @@
         typeBatch: null,           // { ids:[], waiters:Map, timer }
         sweepNeeded: false,        // set when DOM nodes were removed
         tooltipEl: null,           // lazy-created custom tooltip element
-        tooltipHideTimer: null     // touch auto-hide timer
+        tooltipHideTimer: null,    // touch auto-hide timer
+        tooltipSticky: false,      // tooltip opened by tap, persists until tap-elsewhere or timeout
+        tooltipFor: null,          // current tooltip text (for toggle detection)
+        tooltipShownAt: 0,         // ms timestamp of last show — debounce scroll-hide
+        lastTouchX: 0,             // last touchstart position for click coord fallback
+        lastTouchY: 0
     };
 
     // ─── Boot ───────────────────────────────────────────────────────────────
@@ -237,11 +242,12 @@
      * depend on any of that.
      */
     function attachTooltipHandlers() {
-        const targetSelector = '[data-jpi-tooltip]';
+        const SEL = '[data-jpi-tooltip]';
 
-        // Mouse path (desktop / JMP).
+        // Mouse hover path (desktop / JMP) — show on hover, hide on leave.
         document.body.addEventListener('mouseover', function (e) {
-            const el = e.target.closest && e.target.closest(targetSelector);
+            if (state.tooltipSticky) return;
+            const el = e.target.closest && e.target.closest(SEL);
             if (!el) return;
             const text = el.getAttribute('data-jpi-tooltip');
             if (!text) return;
@@ -249,40 +255,77 @@
         }, true);
 
         document.body.addEventListener('mousemove', function (e) {
+            if (state.tooltipSticky) return;
             if (!state.tooltipEl || state.tooltipEl.style.display === 'none') return;
-            const el = e.target.closest && e.target.closest(targetSelector);
+            const el = e.target.closest && e.target.closest(SEL);
             if (!el) { hideTooltip(); return; }
             positionTooltip(e.clientX, e.clientY);
         }, true);
 
         document.body.addEventListener('mouseout', function (e) {
-            const from = e.target.closest && e.target.closest(targetSelector);
+            if (state.tooltipSticky) return;
+            const from = e.target.closest && e.target.closest(SEL);
             if (!from) return;
             const to = e.relatedTarget && e.relatedTarget.closest
-                ? e.relatedTarget.closest(targetSelector) : null;
+                ? e.relatedTarget.closest(SEL) : null;
             if (to !== from) hideTooltip();
         }, true);
 
-        // Touch path (Android Mobile, iPad/iPhone Safari): tap a badge to
-        // show the tooltip for ~4s. Tap anywhere else to dismiss. We let
-        // the touch event continue to propagate so navigation still works
-        // when the user taps the surrounding card.
+        // Capture the touch point so the synthesized click that follows can
+        // position the tooltip even if its clientX/Y is 0 (Android quirk).
         document.body.addEventListener('touchstart', function (e) {
-            const touch = e.touches && e.touches[0];
-            if (!touch) return;
-            const el = e.target.closest && e.target.closest(targetSelector);
-            if (!el) { hideTooltip(); return; }
-            const text = el.getAttribute('data-jpi-tooltip');
-            if (!text) return;
-            showTooltip(text, touch.clientX, touch.clientY);
-            clearTimeout(state.tooltipHideTimer);
-            state.tooltipHideTimer = setTimeout(hideTooltip, 4000);
+            const t = e.touches && e.touches[0];
+            if (t) { state.lastTouchX = t.clientX; state.lastTouchY = t.clientY; }
         }, { passive: true, capture: true });
 
-        // Hide on scroll / blur — common reasons the cursor "leaves"
-        // without firing mouseout (touch-scroll on mobile webview, etc.).
-        window.addEventListener('scroll', hideTooltip, true);
-        window.addEventListener('blur', hideTooltip);
+        // Tap / click — both desktop click and the synthesized click after a
+        // touchend. Capture phase + stopPropagation + preventDefault is what
+        // beats the card's navigation handler. This is the missing piece on
+        // mobile: tapping the badge used to navigate the card before the
+        // tooltip could render.
+        document.body.addEventListener('click', function (e) {
+            const el = e.target.closest && e.target.closest(SEL);
+            if (!el) {
+                if (state.tooltipSticky) { state.tooltipSticky = false; hideTooltip(); }
+                return;
+            }
+            e.stopPropagation();
+            if (e.cancelable) e.preventDefault();
+            if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+
+            const text = el.getAttribute('data-jpi-tooltip');
+            if (!text) return;
+
+            // Toggle: tap the same badge again to dismiss.
+            if (state.tooltipSticky && state.tooltipFor === text) {
+                state.tooltipSticky = false;
+                hideTooltip();
+                return;
+            }
+
+            const x = e.clientX || state.lastTouchX || 0;
+            const y = e.clientY || state.lastTouchY || 0;
+            showTooltip(text, x, y);
+            state.tooltipSticky = true;
+            state.tooltipFor = text;
+            state.tooltipShownAt = Date.now();
+            clearTimeout(state.tooltipHideTimer);
+            state.tooltipHideTimer = setTimeout(function () {
+                state.tooltipSticky = false;
+                hideTooltip();
+            }, 6000);
+        }, true);
+
+        // Touch-scroll on Android fires scroll immediately after touchstart;
+        // grace-window prevents the just-shown tooltip from being yanked.
+        window.addEventListener('scroll', function () {
+            if (state.tooltipShownAt && Date.now() - state.tooltipShownAt < 500) return;
+            if (!state.tooltipSticky) hideTooltip();
+        }, true);
+        window.addEventListener('blur', function () {
+            state.tooltipSticky = false;
+            hideTooltip();
+        });
     }
 
     function ensureTooltipEl() {
