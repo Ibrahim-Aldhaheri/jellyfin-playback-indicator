@@ -1,5 +1,5 @@
 /**
- * Jellyfin Playback Indicator v0.5.8
+ * Jellyfin Playback Indicator v0.5.9
  *
  * Shows Direct Play / Re-mux / Direct Stream / Transcode badges for items.
  *
@@ -10,18 +10,21 @@
  *  ❌ Transcode     — video re-encoded (and possibly audio too); expensive
  *
  * Accuracy strategy (in order of preference):
- *   1. Native shell. JMP and Android inject window.NativeShell.AppHost
- *      whose getDeviceProfile() returns the *exact* profile the native
- *      player uses. Same call jellyfin-web makes when starting playback.
- *   2. Pre-fetch the active session's DeviceProfile via GET /Sessions.
- *   3. Sniff outgoing real player calls (XHR + fetch) to /Items/{id}/PlaybackInfo
+ *   1. Android "Integrated Player" — window.NativePlayer.isEnabled() === true
+ *      means ExoPlayer will handle playback, not the webview. The webview's
+ *      NativeShell profile is conservative (webview-only codecs); the real
+ *      one is ExoPlayerPlugin's permissive stub. Use that.
+ *   2. Native shell. JMP and Jellyfin Mobile inject window.NativeShell.AppHost
+ *      whose getDeviceProfile() returns the profile the native player uses.
+ *   3. Pre-fetch the active session's DeviceProfile via GET /Sessions.
+ *   4. Sniff outgoing real player calls (XHR + fetch) to /Items/{id}/PlaybackInfo
  *      and capture any richer profile they send.
- *   4. Synthetic profile as last resort.
+ *   5. Synthetic profile as last resort.
  */
 (function () {
     'use strict';
 
-    const VERSION = '0.5.8';
+    const VERSION = '0.5.9';
     const PLUGIN_ID = 'b6f3e2a1-d4c5-4e7a-8b3f-9e2d1c0a8b5e';
 
     const RESULT_PREFIX = 'jpi_v8_';
@@ -102,7 +105,7 @@
         observer: null,
         scanTimer: null,
         destroyed: false,
-        keySuffix: null,           // userId + deviceId + codecFp, computed once
+        codecFp: null,             // canPlayType fingerprint, computed once
         cachedProfile: null,       // parsed device profile, mirrored from localStorage
         cachedProfileFp: null,     // cheap fingerprint for change detection
         maxBitrate: DEFAULT_MAX_BITRATE, // user's actual MaxStreamingBitrate
@@ -185,6 +188,17 @@
     }
 
     function primeDeviceProfile() {
+        // Android Integrated Player short-circuits everything: when ExoPlayer
+        // is the active player, NativeShell.AppHost.getDeviceProfile() still
+        // returns the (conservative) webview profile, but actual playback
+        // goes through ExoPlayer with a near-universal stub profile. Skip
+        // the webview profile entirely in this case.
+        if (isAndroidIntegratedPlayer()) {
+            const exo = buildAndroidIntegratedProfile();
+            logProfileSource('Android Integrated Player (ExoPlayer)', exo);
+            persistProfile(exo);
+            return;
+        }
         getNativeShellProfile().then(function (nsProfile) {
             if (nsProfile) {
                 logProfileSource('NativeShell.AppHost', nsProfile);
@@ -198,6 +212,48 @@
                 }
             });
         });
+    }
+
+    /**
+     * jellyfin-android exposes a `@JavascriptInterface` named NativePlayer
+     * (see app/src/main/java/org/jellyfin/mobile/bridge/NativePlayer.kt).
+     * `NativePlayer.isEnabled()` returns true when the user has selected
+     * "Integrated Player" in settings — that means video playback bypasses
+     * the webview and runs through ExoPlayer, which supports much more
+     * (HEVC, DTS, TrueHD, 7.1 channels, …) than what canPlayType reports.
+     */
+    function isAndroidIntegratedPlayer() {
+        try {
+            const np = window.NativePlayer;
+            return !!(np && typeof np.isEnabled === 'function' && np.isEnabled());
+        } catch (_) { return false; }
+    }
+
+    /**
+     * Mirrors ExoPlayerPlugin.js's stub profile (jellyfin-android,
+     * app/src/main/assets/native/ExoPlayerPlugin.js getDeviceProfile()).
+     * The empty Container/Codec on the DirectPlayProfiles entries is the
+     * key: it tells the server "this player handles everything, don't
+     * transcode unless absolutely necessary". The server returns
+     * SupportsDirectPlay=true for nearly all content.
+     */
+    function buildAndroidIntegratedProfile() {
+        return {
+            Name: 'PlaybackIndicator Synthetic (Android Integrated)',
+            MaxStreamingBitrate: 200000000,
+            MaxStaticBitrate: 200000000,
+            DirectPlayProfiles: [
+                { Type: 'Video' },
+                { Type: 'Audio' }
+            ],
+            TranscodingProfiles: [{
+                Container: 'ts', Type: 'Video', VideoCodec: 'h264',
+                AudioCodec: 'aac,mp3,ac3', Context: 'Streaming', Protocol: 'hls'
+            }],
+            CodecProfiles: [],
+            ContainerProfiles: [],
+            SubtitleProfiles: []
+        };
     }
 
     function logProfileSource(source, profile) {
@@ -514,7 +570,8 @@
     function isOurSyntheticName(n) {
         return n === 'PlaybackIndicator Synthetic' ||
             n === 'PlaybackIndicator Synthetic (browser)' ||
-            n === 'PlaybackIndicator Synthetic (native shell)';
+            n === 'PlaybackIndicator Synthetic (native shell)' ||
+            n === 'PlaybackIndicator Synthetic (Android Integrated)';
     }
 
     function loadPersistedBitrate() {
@@ -643,12 +700,30 @@
     }
 
     function getDeviceProfile() {
-        if (state.cachedProfile) return state.cachedProfile;
+        // Always honor the Integrated Player setting at lookup time. If the
+        // user toggles it mid-session, we should switch profiles without
+        // waiting for a reload. The mode is also baked into the cache-key
+        // suffix, so results from the other mode won't leak through.
+        if (isAndroidIntegratedPlayer()) {
+            const cached = state.cachedProfile;
+            if (cached && cached.Name === 'PlaybackIndicator Synthetic (Android Integrated)') {
+                return cached;
+            }
+            const exo = buildAndroidIntegratedProfile();
+            state.cachedProfile = exo;
+            state.cachedProfileFp = profileFingerprint(exo);
+            return exo;
+        }
+        if (state.cachedProfile &&
+            state.cachedProfile.Name !== 'PlaybackIndicator Synthetic (Android Integrated)') {
+            return state.cachedProfile;
+        }
         try {
             const raw = localStorage.getItem(PROFILE_KEY);
             if (raw) {
                 const e = JSON.parse(raw);
-                if (e.profile && (Date.now() - (e.captured || 0)) < PROFILE_TTL_MS) {
+                if (e.profile && (Date.now() - (e.captured || 0)) < PROFILE_TTL_MS &&
+                    e.profile.Name !== 'PlaybackIndicator Synthetic (Android Integrated)') {
                     state.cachedProfile = e.profile;
                     state.cachedProfileFp = profileFingerprint(e.profile);
                     return state.cachedProfile;
@@ -783,13 +858,14 @@
     }
 
     function getKeySuffix() {
-        if (!state.keySuffix) {
-            const ac = window.ApiClient;
-            const userId = (ac && ac.getCurrentUserId && ac.getCurrentUserId()) || 'u';
-            const deviceId = (ac && ac.deviceId && ac.deviceId()) || 'd';
-            state.keySuffix = '_' + userId + '_' + deviceId + '_' + computeCodecFp();
-        }
-        return state.keySuffix;
+        const ac = window.ApiClient;
+        const userId = (ac && ac.getCurrentUserId && ac.getCurrentUserId()) || 'u';
+        const deviceId = (ac && ac.deviceId && ac.deviceId()) || 'd';
+        if (!state.codecFp) state.codecFp = computeCodecFp();
+        // Mode is recomputed every call: toggling Integrated Player in the
+        // Android app should produce a fresh cache without a page reload.
+        const mode = isAndroidIntegratedPlayer() ? 'exo' : 'web';
+        return '_' + userId + '_' + deviceId + '_' + mode + '_' + state.codecFp;
     }
 
     function makeResultKey(itemId) {

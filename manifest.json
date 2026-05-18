@@ -9,6 +9,14 @@
     "imageUrl": "https://raw.githubusercontent.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/main/icon.png",
     "versions": [
       {
+        "changelog": "Fix wrong predictions on Jellyfin for Android when the 'Integrated Player' setting is on. The webview's NativeShell.AppHost.getDeviceProfile() returns a conservative webview-only profile (no HEVC, no DTS/TrueHD, no 7.1, …) but actual playback runs through ExoPlayer with a near-universal stub profile — so items that direct-play in practice were showing as Transcode. Now detect window.NativePlayer.isEnabled() (the @JavascriptInterface jellyfin-android exposes for this setting) and substitute the same stub profile ExoPlayerPlugin sends server-side. Cache keys include the mode (exo vs web) so toggling the setting doesn't return stale results from the other mode.",
+        "targetAbi": "10.11.0",
+        "version": "0.5.9.0",
+        "sourceUrl": "https://github.com/Ibrahim-Aldhaheri/jellyfin-playback-indicator/releases/download/0.5.9.0/Jellyfin.Plugin.PlaybackIndicator_0.5.9.0.zip",
+        "checksum": "0f34459146e1c75b78929a48b7013122",
+        "timestamp": "2026-05-18"
+      },
+      {
         "changelog": "Fix tooltip not showing on Android tap. v0.5.7 added a touchstart handler but the synthesized click that follows the tap still propagated to the card, so the page navigated away before the tooltip could render. Now intercepts the click in capture phase, stops propagation + preventDefault, then shows a sticky tooltip that stays for 6 seconds (or until you tap the badge again to toggle off, or tap elsewhere to dismiss). The same handler covers desktop click — clicking a badge no longer navigates the card, it shows the tooltip. Hover behavior on desktop unchanged. Touch position captured from touchstart so the synthesized click can position the tooltip even when its clientX/Y is 0 (Android quirk). Scroll-hide has a 500ms grace window so Android's touch-scroll doesn't yank the tooltip the moment it opens.",
         "targetAbi": "10.11.0",
         "version": "0.5.8.0",
